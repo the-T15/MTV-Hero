@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yargvid"
+version = "2.0.0"
+description = "Background music videos for a YARG/CH library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "the-T15"},
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "yt-dlp",
+]
+
+[project.optional-dependencies]
+desktop = ["PySide6>=6.5"]
+
+[project.urls]
+Homepage = "https://github.com/the-T15/MTV-Hero"
+Issues = "https://github.com/the-T15/MTV-Hero/issues"
+
+[project.scripts]
+yargvid = "yargvid.cli:main"
+
+[tool.setuptools]
+packages = ["yargvid"]
+
+
+# ------------------------------------------------------------------ ruff ---
+# Not a dependency of the tool. Development only: `pip install ruff`, then
+# `ruff check yargvid/` from the repository root.
+
+[tool.ruff]
+# The width to aim at when writing or wrapping code.
+line-length = 79
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "W", "F"]
+
+[tool.ruff.lint.pycodestyle]
+# The width that is actually an error. It sits above `line-length` on purpose:
+# a handful of lines run long because of the message text they print, not
+# because of their structure, and rewording output a user reads in order to
+# satisfy a linter is the wrong trade.
+max-line-length = 90
+
+[tool.ruff.lint.per-file-ignores]
+# The argparse block keeps each subcommand and its `set_defaults` on one line.
+# Expanding the semicolons turns a scannable table into a list twice as tall.
+"yargvid/cli.py" = ["E702"]

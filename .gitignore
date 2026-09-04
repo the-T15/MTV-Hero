@@ -1,0 +1,29 @@
+# Pipeline state and working files
+yargvid.sqlite
+yargvid.sqlite-shm
+yargvid.sqlite-wal
+.yargvid_work/
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local scripts and working documents, not part of the tool
+publish.py
+NOTES.md
+HANDOFF_*.md
+
+# Tooling caches
+.ruff_cache/
