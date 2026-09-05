@@ -87,7 +87,8 @@ class Database:
         for col, decl in (("motion", "REAL"), ("review", "TEXT"),
                           ("dominance", "REAL"),
                           ("existing_video", "TEXT"),
-                          ("download_note", "TEXT")):
+                          ("download_note", "TEXT"),
+                          ("windows", "INTEGER")):
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
         self.conn.commit()

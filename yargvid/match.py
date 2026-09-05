@@ -523,9 +523,14 @@ def pick_best(
 def download_video(
     video_id: str, dest: Path, max_height: int = 1080,
     cookies: str | None = None, sleep: float = 0.0,
-) -> Path | None:
+) -> tuple[Path | None, str]:
     """
     Fetch the winning video at up to `max_height`, WITH its audio track.
+
+    Returns (path, note). The note is empty on success and carries the failure
+    reason otherwise: a pulled video, a format problem and a network blip all
+    exit non-zero, and collapsing them into None left the download stage
+    recording 'failed' with no way to tell which it had been.
 
     The audio is not kept in the final webm - encode.py strips it with `-an`
     because YARG plays the chart stems. But the sync stage has to hear the

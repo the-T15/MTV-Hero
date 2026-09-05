@@ -330,6 +330,7 @@ def cmd_sync(args, db: Database) -> None:
             sync_note=res.reason,
             motion=motion,
             dominance=res.dominance,
+            windows=res.windows,
         )
         if recheck:
             old = row["offset_ms"]
@@ -348,16 +349,24 @@ def cmd_sync(args, db: Database) -> None:
 
         flag = {"ok": "", "unverified": "  [UNVERIFIED]",
                 "drift": "  [DRIFT]", "rejected": "  [REJECTED]"}[res.status]
+        # Spread alone is ambiguous: 3 ms across 7 windows and 3 ms across 4
+        # print identically, and the second is a far weaker claim.
+        agreed = (f" over {res.windows}/{res.windows_total} windows"
+                  if res.windows_total else "")
         print(
             f"    video_start_time = {res.video_start_time}  "
-            f"spread {res.spread_ms:.0f} ms{flag}"
+            f"spread {res.spread_ms:.0f} ms{agreed}{flag}"
         )
         if enc.is_static(motion):
             print(f"    [STATIC IMAGE - motion {motion:.2f}, no moving footage]")
         # Once shifted, does the video still reach the end of the song?
+        # Positive video_start_time seeks the video forward, so its end arrives
+        # that much earlier in song time. Negative DELAYS the video, so its end
+        # lands |offset| later and coverage goes up - clamping at zero threw
+        # that away and reported most of the negative-offset library as short.
         vid_len = au.duration_of(src)
         chart_len = chart.size / fp.SR
-        covered = vid_len - max(0.0, res.offset_ms / 1000.0)
+        covered = vid_len - res.offset_ms / 1000.0
         if chart_len > 0 and covered < chart_len - 5:
             print(f"    [SHORT - video runs out {chart_len - covered:.0f}s "
                   f"before the song ends]")
