@@ -61,7 +61,18 @@ CREATE TABLE IF NOT EXISTS candidates (
 """
 
 STAGES = ("match", "download", "sync", "encode", "ini")
-
+# What must already be true for a song to be eligible for a stage at all.
+#
+# Shared by pending() and counts() deliberately. When counts() had its own
+# unfiltered GROUP BY, `status` reported every song that failed an earlier
+# stage as 'pending' for all the later ones
+PREREQ = {
+    "match": "1=1",
+    "download": "match_status = 'ok'",
+    "sync": "download_status = 'ok'",
+    "encode": "sync_status IN ('ok', 'drift', 'unverified')",
+    "ini": "encode_status = 'ok'",
+}
 
 class Database:
     def __init__(self, path: Path):
@@ -138,13 +149,7 @@ class Database:
         sequential batch measures one corner of a library and its rates do not
         generalise. For a diagnostic run, sample randomly.
         """
-        prereq = {
-            "match": "1=1",
-            "download": "match_status = 'ok'",
-            "sync": "download_status = 'ok'",
-            "encode": "sync_status IN ('ok', 'drift', 'unverified')",
-            "ini": "encode_status = 'ok'",
-        }[stage]
+        prereq = PREREQ[stage]
         order = "RANDOM()" if shuffle else "song_dir"
         sql = (
             f"SELECT * FROM songs WHERE {stage}_status = 'pending' AND {prereq} "
@@ -212,10 +217,20 @@ class Database:
         return cur.rowcount
 
     def counts(self) -> dict[str, dict[str, int]]:
+        """
+        Per-stage status tallies for `status`.
+
+        'pending' is filtered by the stage's prerequisite so it means "still to
+        do" rather than "has not happened", which for a song blocked upstream
+        is never going to change. Every other status is counted unconditionally:
+        a row that failed or completed is a real outcome regardless of what
+        happened before it, and hiding those would understate the failures.
+        """
         out: dict[str, dict[str, int]] = {}
         for stage in STAGES:
             rows = self.conn.execute(
                 f"SELECT {stage}_status AS s, COUNT(*) AS n FROM songs "
+                f"WHERE {stage}_status != 'pending' OR ({PREREQ[stage]}) "
                 f"GROUP BY {stage}_status"
             ).fetchall()
             out[stage] = {r["s"]: r["n"] for r in rows}
