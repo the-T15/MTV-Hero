@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import os
 import re
 import shutil
 import sys
@@ -92,11 +93,16 @@ def write_video_start_time(song_dir: Path, value: int, backup: bool = True) -> N
     if backup and ini.exists() and not (song_dir / "song.ini.bak").exists():
         shutil.copy2(ini, song_dir / "song.ini.bak")
 
-    lines = (
-        ini.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    raw = (
+        ini.read_text(encoding="utf-8-sig", errors="replace")
         if ini.exists()
-        else ["[song]"]
+        else "[song]"
     )
+    # splitlines() discards line endings and rejoining hardcodes \n, which
+    # silently converts a CRLF song.ini to LF. Harmless to the games, but the
+    # docstring claims everything else is preserved verbatim.
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines()
 
     new_line = f"video_start_time = {value}"
     for i, line in enumerate(lines):
@@ -111,7 +117,14 @@ def write_video_start_time(song_dir: Path, value: int, backup: bool = True) -> N
                 break
         lines.insert(insert_at, new_line)
 
-    ini.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Write-then-rename rather than writing in place. A crash or a full disk
+    # partway through a direct write leaves a truncated song.ini, which the game
+    # reads as a song with no metadata. os.replace is atomic within a
+    # directory, and the temp file is in the song folder, so it never crosses
+    # a filesystem boundary.
+    tmp = ini.parent / (ini.name + ".tmp")
+    tmp.write_text(newline.join(lines) + newline, encoding="utf-8")
+    os.replace(tmp, ini)
 
 
 # ------------------------------------------------------------------ stages ---
