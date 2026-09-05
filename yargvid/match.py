@@ -556,11 +556,14 @@ def download_video(
     cmd += cookie_args(cookies)
     cmd += _sleep_args(sleep)
 
-    if _run(cmd, timeout=3600).returncode != 0:
-        return None
+    proc = _run(cmd, timeout=3600)
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().replace("\n", " ")
+        return None, err[:200] or f"yt-dlp exit {proc.returncode}"
+
     hits = list(dest.parent.glob(f"{dest.stem}.src.*"))
     if not hits:
-        return None
+        return None, "yt-dlp reported success but wrote no file"
 
     # Fail loudly here rather than letting a silent file reach sync, where the
     # only symptom is a useless "empty audio" rejection one stage later.
@@ -571,5 +574,5 @@ def download_video(
     has_audio = any(s.get("codec_type") == "audio" for s in streams)
     if not (has_video and has_audio):
         src.unlink(missing_ok=True)
-        return None
-    return src
+        return None, "no audio or video stream in the downloaded file"
+    return src, ""

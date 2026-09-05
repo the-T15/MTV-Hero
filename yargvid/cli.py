@@ -253,13 +253,15 @@ def cmd_download(args, db: Database) -> None:
     for n, row in enumerate(rows, 1):
         d = Path(row["song_dir"])
         print(f"[{n}/{len(rows)}] {row['title']}", flush=True)
-        src = mt.download_video(
+        src, note = mt.download_video(
             row["video_id"], d / "video", args.height, args.cookies, args.sleep
         )
         if src is None:
-            db.update(d, download_status="failed")
+            db.update(d, download_status="failed", download_note=note)
+            print(f"  Failed: {note}")
         else:
-            db.update(d, download_status="ok", source_path=str(src))
+            db.update(d, download_status="ok", source_path=str(src),
+                      download_note=None)
 
 
 def cmd_sync(args, db: Database) -> None:
@@ -1243,7 +1245,8 @@ def cmd_status(args, db: Database) -> None:
     if queue:
         print(f"\n{len(queue)} songs need manual review. First 15:")
         for row in queue[:15]:
-            note = row["match_note"] or row["sync_note"] or row["encode_note"] or ""
+            note = (row["match_note"] or row["download_note"]
+                    or row["sync_note"] or row["encode_note"] or "")
             print(f"  {row['artist']} - {row['title']}: {note[:70]}")
 
 

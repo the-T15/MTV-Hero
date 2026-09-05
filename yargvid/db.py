@@ -86,7 +86,8 @@ class Database:
         existing = {r[1] for r in self.conn.execute("PRAGMA table_info(songs)")}
         for col, decl in (("motion", "REAL"), ("review", "TEXT"),
                           ("dominance", "REAL"),
-                          ("existing_video", "TEXT")):
+                          ("existing_video", "TEXT"),
+                          ("download_note", "TEXT")):
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
         self.conn.commit()
@@ -240,10 +241,12 @@ class Database:
         """Everything a human needs to look at, with the reason attached."""
         return self.conn.execute(
             "SELECT song_dir, artist, title, match_status, match_note, "
+            "       download_status, download_note, "
             "       sync_status, sync_note, encode_note "
             "FROM songs "
             "WHERE match_status NOT IN ('pending', 'ok') "
             "   OR match_note LIKE 'REVIEW:%' "
+            "   OR download_status = 'failed' "
             "   OR sync_status NOT IN ('pending', 'ok', 'drift') "
             "   OR encode_status NOT IN ('pending', 'ok') "
             "ORDER BY song_dir"
