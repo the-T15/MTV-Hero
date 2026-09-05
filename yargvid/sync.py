@@ -95,6 +95,31 @@ def gcc_phat(a: np.ndarray, b: np.ndarray, max_lag: int) -> tuple[float, float]:
     return -lag, sharpness
 
 
+def _window_range(chart_n: int, video_n: int, shift: int) -> tuple[int, int]:
+    """
+    Chart sample range where a window has video underneath it.
+
+    A window at chart index s reads video at s + shift, so it is valid only
+    while both indices are in bounds. That gives [max(0, -shift), min(chart_n,
+    video_n - shift)].
+
+    The lower bound is the part that used to be missing. Windows were laid out
+    from 0 regardless of sign, so for a negative shift the early ones mapped to
+    a negative video index and were dropped by the bounds check inside the
+    loop - and because the upper bound ignored the shift too, the last |shift|
+    seconds of alignable material never got a window at all. On Boney M. -
+    Rasputin (chart 357.5s, video 283.4s, offset -65.3s) verification covered
+    87.8-283.4s of a valid 65.3-348.7s, so 88 seconds including the whole tail
+    went unchecked. Most of this library sits at a negative offset.
+
+    For a positive shift this returns exactly what the old expression computed,
+    so positive-offset songs are unaffected.
+    """
+    lo = max(0, -shift)
+    hi = min(chart_n, video_n - shift)
+    return lo, hi
+
+
 # Identity was already decided at match time, on this exact video. Re-running
 # the full gate here is a second coin flip on a different audio stream: a
 # marginal song can pass match at 60 and fail sync at 55.8 on the same video.
@@ -198,12 +223,12 @@ def probe_offset(
     max_lag = int(SEARCH_MS / 1000.0 * REFINE_SR)
     shift = int(round(offset_ms / 1000.0 * REFINE_SR))
 
-    usable = min(chart_hi.size, video_hi.size - shift if shift > 0 else video_hi.size)
-    usable = min(usable, chart_hi.size)
+    lo, hi = _window_range(chart_hi.size, video_hi.size, shift)
+    usable = hi - lo
     if usable < win:
         return {"windows": 0, "usable_s": max(0.0, usable / REFINE_SR)}
 
-    starts = np.linspace(0, max(0, usable - win), N_EXCERPTS).astype(int)
+    starts = np.linspace(lo, max(lo, hi - win), N_EXCERPTS).astype(int)
     sharps: list[float] = []
     offs: list[float] = []
     for s in starts:
@@ -340,8 +365,8 @@ def _verify(
     max_lag = int(SEARCH_MS / 1000.0 * REFINE_SR)
     shift = int(round(m.offset_seconds * REFINE_SR))
 
-    usable = min(chart_hi.size, video_hi.size - shift if shift > 0 else video_hi.size)
-    usable = min(usable, chart_hi.size)
+    lo, hi = _window_range(chart_hi.size, video_hi.size, shift)
+    usable = hi - lo
     if usable < win * 2:
         # Same trap as below: too little overlap to fit even two windows, so
         # nothing is verified. A short video combined with a large shift lands
@@ -354,7 +379,7 @@ def _verify(
                     f"to check this offset anywhere"),
         )
 
-    starts = np.linspace(0, usable - win, N_EXCERPTS).astype(int)
+    starts = np.linspace(lo, hi - win, N_EXCERPTS).astype(int)
     points: list[tuple[float, float]] = []
     sharps: list[float] = []
 
