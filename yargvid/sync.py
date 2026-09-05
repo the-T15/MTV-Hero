@@ -413,6 +413,12 @@ def _verify(
 
     strength = float(np.median(sharps)) if sharps else 0.0
     n_used, n_total = len(points), len(starts)
+    # Every SyncResult below passes by keyword. These three branches used
+    # positional arguments, and when `dominance` was added to the dataclass
+    # between `sharpness` and `windows` they silently shifted by one: the
+    # window count landed in dominance, coverage landed in windows_total, the
+    # excerpt list landed in coverage, and excerpts was left empty. Nothing
+    # raised, because every field from that point on is a number or a list.
     times = np.array([p[0] for p in points])
     offs = np.array([p[1] for p in points])
     spread = float(offs.max() - offs.min())
@@ -436,7 +442,9 @@ def _verify(
     if r2 >= DRIFT_R2 and abs(drift_ppm) <= MAX_DRIFT_PPM:
         return SyncResult(
             "drift", float(intercept), spread, drift_ppm, r2,
-            m.score, strength, n_used, n_total, m.coverage, points,
+            fp_score=m.score, sharpness=strength,
+            windows=n_used, windows_total=n_total,
+            coverage=m.coverage, excerpts=points,
             reason=f"linear drift {drift_ppm:.0f} ppm (R2={r2:.3f})",
         )
 
@@ -447,13 +455,17 @@ def _verify(
     if static_background:
         return SyncResult(
             "ok", float(np.median(offs)), spread, drift_ppm, r2,
-            m.score, strength, n_used, n_total, m.coverage, points,
+            fp_score=m.score, sharpness=strength,
+            windows=n_used, windows_total=n_total,
+            coverage=m.coverage, excerpts=points,
             reason=f"spread {spread:.0f} ms accepted - static background",
         )
 
     # Case 3: scattered. Edited video, different cut, or a bad match.
     return SyncResult(
         "rejected", float(np.median(offs)), spread, drift_ppm, r2,
-        m.score, strength, n_used, n_total, m.coverage, points,
+        fp_score=m.score, sharpness=strength,
+        windows=n_used, windows_total=n_total,
+        coverage=m.coverage, excerpts=points,
         reason=f"excerpts disagree by {spread:.0f} ms with no linear trend (R2={r2:.2f})",
     )

@@ -85,7 +85,7 @@ PENALISE_TERMS = (
     # Documentaries about a video are not the video. "The Making Of The
     # Official Video" otherwise scores +5 for containing "official video".
     ("making of", -12.0), ("the making", -12.0), ("behind the scenes", -10.0),
-    ("making the", -10.0),
+    ("making the", -10.0), ("bts video", -10.0), ("bts footage", -10.0),
     ("nightcore", -9.0), ("playthrough", -8.0),
     # Rhythm-game and gameplay captures. These matter far more here than for a
     # general music library: every song in a YARG library is by definition a
