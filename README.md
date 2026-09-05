@@ -3,6 +3,8 @@
 Finds, syncs and encodes a background music video for every song in a
 YARG/Clone Hero library.
 
+Installed and run as `yargvid`.
+
 ---
 
 ## What it does
@@ -76,7 +78,7 @@ failure here, and it has nothing to do with this code.
 ## Usage
 
 ```
-yargvid index "D:\path\to\YARG\Songs"
+yargvid index "D:\path\to\Songs"
 
 yargvid match
 yargvid download
@@ -125,7 +127,7 @@ yargvid review
 Three lists: songs worth watching, songs whose background is a still image, and
 songs saved for later. Each song plays a 36-second clip — three 12-second
 segments from across the track — with the offset already applied by ffmpeg, so
-what you see is what YARG will show.
+what you see is what the game will show.
 
 The ordering matters more than the player. Reviewing 1,500 songs one by one is
 not realistic, so everything the pipeline knows about its own uncertainty is
@@ -162,7 +164,7 @@ are not mistaken for still images. No title reliably predicts it.
 
 **Some videos cannot be synced at all.** A video with a skit, an extended solo
 or a different edit aligns at several offsets in different stretches of the
-song. YARG applies one, so only one stretch can be in time. `blocks` shows
+song. The game applies one, so only one stretch can be in time. `blocks` shows
 which, and what fraction of the song each covers.
 
 **Confidence in a single offset is unsolved.** Several statistical approaches
