@@ -13,6 +13,7 @@ Run from the repository root:  pytest -q
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -288,7 +289,8 @@ def test_song_ini_keeps_lf(tmp_path):
 # ------------------------------------------------------------- subprocess ----
 
 def test_B4_run_survives_a_hung_process():
-    proc = mt._run(["python3", "-c", "import time; time.sleep(5)"], timeout=1)
+    proc = mt._run([sys.executable, "-c", "import time; time.sleep(5)"],
+                   timeout=1)
     assert proc.returncode != 0
     assert "timed out" in proc.stderr.lower()
 
