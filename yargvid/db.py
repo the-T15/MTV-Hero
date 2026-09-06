@@ -16,6 +16,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from .encode import STATIC_THRESHOLD
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS songs (
     song_dir        TEXT PRIMARY KEY,
@@ -61,6 +63,12 @@ CREATE TABLE IF NOT EXISTS candidates (
 """
 
 STAGES = ("match", "download", "sync", "encode", "ini")
+
+# Sync outcomes worth encoding. 'unverified' is one of them: it means "a guess,
+# check it in review", not "failed". Named once because every place that
+# re-typed the list eventually disagreed with the others.
+ENCODABLE = ("ok", "drift", "unverified")
+_ENCODABLE_SQL = ", ".join(f"'{s}'" for s in ENCODABLE)
 # What must already be true for a song to be eligible for a stage at all.
 #
 # Shared by pending() and counts() deliberately. When counts() had its own
@@ -70,7 +78,7 @@ PREREQ = {
     "match": "1=1",
     "download": "match_status = 'ok'",
     "sync": "download_status = 'ok'",
-    "encode": "sync_status IN ('ok', 'drift', 'unverified')",
+    "encode": f"sync_status IN ({_ENCODABLE_SQL})",
     "ini": "encode_status = 'ok'",
 }
 
@@ -195,7 +203,12 @@ class Database:
         """
         where = f"{stage}_status != 'pending'"
         if only_failed:
-            where = f"{stage}_status NOT IN ('pending', 'ok', 'drift')"
+            # 'skipped' is a user decision from the review app and 'unverified'
+            # is an accepted outcome everywhere else (PREREQ['encode'],
+            # review.queue, export). Neither is a failure, so a retry of the
+            # failures must leave both exactly as they are.
+            where = (f"{stage}_status NOT IN "
+                     f"('pending', 'ok', 'drift', 'unverified', 'skipped')")
 
         downstream = STAGES[STAGES.index(stage) + 1:]
         sets = [f"{stage}_status = 'pending'"]
@@ -205,8 +218,11 @@ class Database:
         # stale can be mistaken for a current result.
         derived = {
             "download": ["source_path"],
+            # `review` is an approval OF the measured offset, so it dies
+            # with the measurement. Leaving it behind marked a song as
+            # confirmed by eye while its offset was back at pending.
             "sync": ["offset_ms", "spread_ms", "drift_ppm", "sync_note",
-                     "motion", "dominance"],
+                     "motion", "dominance", "review"],
             "encode": ["encode_note"],
         }
         for s in (stage, *downstream):
@@ -248,7 +264,7 @@ class Database:
             "WHERE match_status NOT IN ('pending', 'ok') "
             "   OR match_note LIKE 'REVIEW:%' "
             "   OR download_status = 'failed' "
-            "   OR sync_status NOT IN ('pending', 'ok', 'drift') "
+            f"   OR sync_status NOT IN ('pending', {_ENCODABLE_SQL}) "
             "   OR encode_status NOT IN ('pending', 'ok') "
             "ORDER BY song_dir"
         ).fetchall()
@@ -258,6 +274,7 @@ class Database:
         return self.conn.execute(
             "SELECT song_dir, artist, title, match_note, motion FROM songs "
             "WHERE match_note LIKE 'REVIEW:%' "
-            "   OR (motion IS NOT NULL AND motion >= 0 AND motion < 0.029) "
-            "ORDER BY song_dir"
+            "   OR (motion IS NOT NULL AND motion >= 0 AND motion < ?) "
+            "ORDER BY song_dir",
+            (STATIC_THRESHOLD,),
         ).fetchall()

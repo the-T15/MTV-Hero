@@ -17,7 +17,26 @@ from . import fingerprint as fp
 from . import match as mt
 from . import review as rv
 from . import sync as sy
-from .db import STAGES, Database
+from .db import ENCODABLE, STAGES, Database
+
+
+# ---------------------------------------------------------------- coverage ---
+
+def covers_song(video_s: float, offset_ms: float, chart_s: float) -> bool:
+    """
+    Does the video still reach the end of the song once it is shifted?
+
+    A positive `video_start_time` seeks the video forward, so its end arrives
+    that much earlier in song time. A negative one DELAYS the video, so its end
+    lands |offset| later and coverage goes UP. The old expression clamped the
+    shift with max(0, off), which threw the negative half away and reported
+    most of a negative-offset library as too short. Five seconds of slack
+    absorbs a fade-out.
+
+    One function because that clamp survived in two further copies of the same
+    test after the first was fixed.
+    """
+    return (video_s - offset_ms / 1000.0) >= chart_s - 5
 
 
 # ---------------------------------------------------------------- song.ini ---
@@ -93,16 +112,15 @@ def write_video_start_time(song_dir: Path, value: int, backup: bool = True) -> N
     if backup and ini.exists() and not (song_dir / "song.ini.bak").exists():
         shutil.copy2(ini, song_dir / "song.ini.bak")
 
-    raw = (
-        ini.read_text(encoding="utf-8-sig", errors="replace")
-        if ini.exists()
-        else "[song]"
-    )
-    # splitlines() discards line endings and rejoining hardcodes \n, which
-    # silently converts a CRLF song.ini to LF. Harmless to the games, but the
-    # docstring claims everything else is preserved verbatim.
-    newline = "\r\n" if "\r\n" in raw else "\n"
-    lines = raw.splitlines()
+    # Bytes, not text. read_text(encoding="utf-8-sig") normalises every line
+    # ending to \n before this function can look at them, so the CRLF check
+    # below could never fire and the "preserved verbatim" promise was a no-op.
+    # It also swallowed the BOM, which was then not written back.
+    raw = ini.read_bytes() if ini.exists() else b"[song]"
+    bom = b"\xef\xbb\xbf" if raw.startswith(b"\xef\xbb\xbf") else b""
+    text = raw[len(bom):].decode("utf-8", errors="replace")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
 
     new_line = f"video_start_time = {value}"
     for i, line in enumerate(lines):
@@ -123,7 +141,7 @@ def write_video_start_time(song_dir: Path, value: int, backup: bool = True) -> N
     # directory, and the temp file is in the song folder, so it never crosses
     # a filesystem boundary.
     tmp = ini.parent / (ini.name + ".tmp")
-    tmp.write_text(newline.join(lines) + newline, encoding="utf-8")
+    tmp.write_bytes(bom + (newline.join(lines) + newline).encode("utf-8"))
     os.replace(tmp, ini)
 
 
@@ -333,16 +351,29 @@ def cmd_sync(args, db: Database) -> None:
             windows=res.windows,
         )
         if recheck:
+            # The measurements above are refreshed unconditionally: they
+            # describe this run, and a stale spread or window count next to a
+            # fresh status is not a reading anyone can use.
+            #
+            # What survives an unchanged answer is the human part - the
+            # approval and the work done on the back of it. "Unchanged" has to
+            # mean the answer, not just the number: a flip to 'rejected' two
+            # ms away from the old offset used to print "unchanged" and leave
+            # review='keep' and encode_status='ok' on a video the pipeline
+            # now refuses to encode.
             old = row["offset_ms"]
             moved = old is None or abs(res.offset_ms - old) > 100
-            if not moved:
+            encodable = res.status in ENCODABLE
+            if not moved and encodable:
                 print(f"    unchanged ({res.video_start_time} ms)")
                 continue
             changed += 1
-            print(f"    CHANGED  {old:.0f} -> {res.video_start_time} ms")
+            was = "?" if old is None else f"{old:.0f}"
+            note = "" if encodable else f"  [now {res.status}]"
+            print(f"    CHANGED  {was} -> {res.video_start_time} ms{note}")
             if res.reason:
                 print(f"      {res.reason[:76]}")
-            # The stored answer was different, so any earlier approval of it
+            # The stored answer no longer holds, so any earlier approval of it
             # no longer applies - send it back for review.
             db.update(d, review=None, encode_status="pending",
                       ini_status="pending")
@@ -359,15 +390,10 @@ def cmd_sync(args, db: Database) -> None:
         )
         if enc.is_static(motion):
             print(f"    [STATIC IMAGE - motion {motion:.2f}, no moving footage]")
-        # Once shifted, does the video still reach the end of the song?
-        # Positive video_start_time seeks the video forward, so its end arrives
-        # that much earlier in song time. Negative DELAYS the video, so its end
-        # lands |offset| later and coverage goes up - clamping at zero threw
-        # that away and reported most of the negative-offset library as short.
         vid_len = au.duration_of(src)
         chart_len = chart.size / fp.SR
         covered = vid_len - res.offset_ms / 1000.0
-        if chart_len > 0 and covered < chart_len - 5:
+        if chart_len > 0 and not covers_song(vid_len, res.offset_ms, chart_len):
             print(f"    [SHORT - video runs out {chart_len - covered:.0f}s "
                   f"before the song ends]")
         if res.reason and not recheck:
@@ -617,7 +643,21 @@ def cmd_inspect(args, db: Database) -> None:
 
 
 def _one_song(db: Database, pattern: str):
-    """Resolve a folder-path substring to exactly one song row."""
+    """
+    Resolve a folder-path substring to exactly one song row.
+
+    An exact song_dir wins outright before the substring search runs. The
+    review app passes the full path, and a folder whose path is a prefix of
+    another's ('...\\Foo' inside '...\\Foo (Live)') matched both through the
+    LIKE - so `set` reported "be more specific" about a song it had been
+    handed by name.
+    """
+    exact = db.conn.execute(
+        "SELECT * FROM songs WHERE song_dir = ?", (pattern,)
+    ).fetchone()
+    if exact is not None:
+        return exact
+
     rows = db.conn.execute(
         "SELECT * FROM songs WHERE song_dir LIKE ? ORDER BY song_dir",
         (f"%{pattern}%",),
@@ -744,13 +784,19 @@ def cmd_set(args, db: Database) -> str:
     if old and Path(old).exists():
         Path(old).unlink(missing_ok=True)
 
+    # Everything measured belongs to the video being replaced. `review` is an
+    # approval of footage that is about to be deleted, and motion, fp_score,
+    # dominance and windows all describe it - left behind they read as current
+    # measurements of a video nobody has downloaded yet.
     db.update(
         d,
         match_status="ok", video_id=vid, match_score=None,
         match_note=f"MANUAL: {title} [{who}]",
         download_status="pending", source_path=None,
         sync_status="pending", offset_ms=None, spread_ms=None,
-        drift_ppm=None, sync_note=None,
+        drift_ppm=None, sync_note=None, fp_score=None,
+        motion=None, dominance=None, windows=None,
+        review=None,
         encode_status="pending", encode_note=None,
         ini_status="pending",
     )
@@ -920,9 +966,7 @@ def cmd_offsets(args, db: Database) -> None:
                   f"(only {r.get('usable_s', 0):.0f}s of overlap)  {label}")
             continue
         delta = off - predicted
-        # Does the video still reach the end of the song at this offset?
-        covers = "yes" if (vid_len - max(0.0, off / 1000.0)) >= chart_len - 5 \
-                 else "NO"
+        covers = "yes" if covers_song(vid_len, off, chart_len) else "NO"
         print(f"  {off:>9.0f}ms {peak:>8} {r['windows']:>4} "
               f"{r['strong']:>3}/{r['windows']:<3} "
               f"{r['sharp_median']:>10.1f} {r['spread_ms']:>7.0f}ms "
@@ -976,6 +1020,16 @@ def cmd_export(args, db: Database) -> None:
     """
     import csv
 
+    # The baseline export is the only record of what the pipeline measured
+    # before a change, and the default --out is the name it was written under.
+    # Re-running export to look at something destroys the thing every result
+    # is compared against, after twenty minutes of decoding.
+    out = Path(args.out)
+    if out.exists() and not getattr(args, "force", False):
+        print(f"{out} already exists.")
+        print("Pass a different --out, or --force to overwrite it.")
+        return
+
     rows = db.conn.execute(
         "SELECT * FROM songs WHERE source_path IS NOT NULL "
         "AND sync_status IN ('ok','drift','unverified','rejected') "
@@ -987,7 +1041,6 @@ def cmd_export(args, db: Database) -> None:
         print("Nothing to export - no songs have a downloaded video.")
         return
 
-    out = Path(args.out)
     print(f"Measuring {len(rows)} songs -> {out}")
     print("This decodes and fingerprints each one; expect a few seconds each.")
 
@@ -1029,8 +1082,7 @@ def cmd_export(args, db: Database) -> None:
                 "chosen_offset_ms": round(off),
                 "spread_ms": r["spread_ms"], "fp_score": r["fp_score"],
                 "motion": r["motion"],
-                "covers_song": int((video_s - max(0.0, off / 1000.0))
-                                   >= chart_s - 5),
+                "covers_song": int(covers_song(video_s, off, chart_s)),
                 "video_id": r["video_id"] or "",
                 "channel": note.rsplit("[", 1)[-1].rstrip("]") if "[" in note else "",
             }
@@ -1391,6 +1443,8 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("export", help="measure every song into a CSV")
     s.add_argument("--out", default="yargvid_analysis.csv")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite the output file if it already exists")
     s.set_defaults(fn=cmd_export)
 
     s = sub.add_parser("videos", help="which folders already hold a video")
@@ -1414,12 +1468,21 @@ def main(argv=None) -> int:
 
     args = p.parse_args(argv)
 
+    # `doctor` checks the tools installed on this machine and has nothing to
+    # ask a database. Opening one CREATES it, so the command whose whole job
+    # is to reassure you left an empty yargvid.sqlite behind in whatever
+    # folder you ran it from - and an empty database looks exactly like a
+    # library with every song lost.
+    if args.cmd == "doctor":
+        args.fn(args, None)
+        return 0
+
     # Only `index` should ever create a database. Every other command opening a
     # missing file would quietly make an empty one, which looks identical to
     # having lost all your work - and the default --db is a RELATIVE path, so
     # running from a different folder is enough to trigger it.
     db_file = Path(args.db)
-    if not db_file.exists() and args.cmd not in ("index", "doctor"):
+    if not db_file.exists() and args.cmd != "index":
         print(f"No database at {db_file.resolve()}")
         print()
         print("The database lives wherever you first ran `index`.")

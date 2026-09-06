@@ -32,6 +32,16 @@ yargvid = "yargvid.cli:main"
 packages = ["yargvid"]
 
 
+# ---------------------------------------------------------------- pytest ---
+# Only tests/ is collected. test_e2e.py and test_fingerprint.py in the root are
+# standalone diagnostic scripts run with `python test_e2e.py`; they synthesise
+# audio and assert on it, and pytest importing them ran the whole thing at
+# collection time and reported a failed measurement as a collection error.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+
 # ------------------------------------------------------------------ ruff ---
 # Not a dependency of the tool. Development only: `pip install ruff`, then
 # `ruff check yargvid/` from the repository root.

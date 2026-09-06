@@ -85,7 +85,11 @@ def assess(row) -> Risk:
         # trusted thing here. Before that it is a brand new video with a brand
         # new offset that nobody has watched - the least verified song there
         # is, and burying it was backwards.
-        if row["review"]:
+        #
+        # 'later' is the opposite of a confirmation: it is the mark for a song
+        # put off precisely because it had not been decided. Any truthy review
+        # counted as checked, so those sank to the bottom of the queue.
+        if row["review"] == "keep":
             return Risk(-10.0, [("clean", "you chose this one, checked")])
         return Risk(9.0, [("replaced",
                            "you replaced this - check the new video and timing")])

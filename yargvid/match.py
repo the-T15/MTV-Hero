@@ -308,9 +308,26 @@ def fetch_metadata(video_id: str, cookies: str | None = None) -> dict:
 
 
 def _run(cmd: list[str], timeout: int = 600) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=timeout)
+    """
+    Run a command and report failure the way callers already expect it.
+
+    A hung yt-dlp or a missing binary raised TimeoutExpired / FileNotFoundError
+    straight out of here and killed the whole batch on one bad song, losing
+    every result after it. Every caller already branches on returncode, so a
+    failure to finish is returned as one rather than thrown.
+    """
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            cmd, 124, "", f"{cmd[0]} timed out after {timeout}s")
+    except OSError as e:
+        # FileNotFoundError when the tool is not installed, and anything else
+        # the OS refuses at launch (permissions, a broken PATH entry).
+        return subprocess.CompletedProcess(
+            cmd, 127, "", f"could not run {cmd[0]}: {e}")
 
 
 def _sleep_args(sleep: float) -> list[str]:

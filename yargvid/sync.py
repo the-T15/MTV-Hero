@@ -328,10 +328,18 @@ def estimate(
         # scattered to +/-80s, with videos far too short to cover the song.
         # Hash count is right for the large majority; where it is not, the
         # answer is a manual offset, not a different automatic rule.
+        #
+        # `m` is the candidate the identity gate above was applied to, and
+        # every candidate is an alternative placement of that same recording.
+        # `_verify` fills fp_score in from whichever candidate it happened to
+        # be handed, so the stored score belonged to the alignment that won
+        # verification rather than the one that proved identity - 19 songs in
+        # the library sit below the gate they were accepted at because of it.
         fallback: SyncResult | None = None
         for cand in cands:
             got = _verify(cand, chart_hi, video_hi, static_background)
             got.dominance = dominance
+            got.fp_score = m.score
             if got.status in ("ok", "drift"):
                 if weak:
                     got.reason = (
@@ -343,6 +351,7 @@ def estimate(
                 fallback = got
         if fallback is not None:
             fallback.dominance = dominance
+            fallback.fp_score = m.score
             return fallback
 
     return SyncResult(
