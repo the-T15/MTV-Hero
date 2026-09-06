@@ -757,15 +757,22 @@ def cmd_set(args, db: Database) -> str:
     """
     Force a specific video for a song and requeue the later stages.
 
-    Returns 'set', 'same', or 'error' so callers can tell the cases apart.
+    Returns 'set', 'same', 'not-found', 'ambiguous' or 'bad-url'. The review
+    app can only report what went wrong if it is told which thing went wrong:
+    a single 'error' had it blaming the link for a pattern that matched two
+    songs, and telling the user to paste a proper URL when they just had.
     """
     row = _one_song(db, args.pattern)
     if row is None:
-        return "error"
+        n = db.conn.execute(
+            "SELECT COUNT(*) FROM songs WHERE song_dir LIKE ?",
+            (f"%{args.pattern}%",),
+        ).fetchone()[0]
+        return "ambiguous" if n > 1 else "not-found"
     vid = mt.parse_video_id(args.url)
     if not vid:
         print(f"Could not read a YouTube video ID from {args.url!r}")
-        return "error"
+        return "bad-url"
 
     # Requeuing deletes the downloaded source and clears the measured offset.
     # Doing that to arrive back at the same video is pure loss, so check first.

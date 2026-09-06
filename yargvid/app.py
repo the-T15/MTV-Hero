@@ -322,7 +322,6 @@ class Window(QWidget):
         self.keep_btn.clicked.connect(lambda: self._act("keep"))
         self.url = QLineEdit()
         self.url.setPlaceholderText("Paste a better YouTube link")
-        self.url.returnPressed.connect(lambda: self._act("replace"))
         self.rep_btn = QPushButton("Use this instead")
         self.rep_btn.clicked.connect(lambda: self._act("replace"))
 
@@ -363,26 +362,14 @@ class Window(QWidget):
         outer.addWidget(split)
 
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle)
-        QShortcut(QKeySequence(Qt.Key.Key_Return), self,
-                  lambda: self._act("keep"))
+        QShortcut(QKeySequence(Qt.Key.Key_Return), self, self._on_return)
         self.refresh()
 
     # ------------------------------------------------------------------ data
     def _rebuild_chips(self) -> None:
-        if self.mode == "later":
-            counts = Counter(t for s in self.all_songs
-                             if s["review"] == "later" for t in s["tags"])
-        elif self.mode == "existing":
-            counts = Counter(t for s in self.all_songs
-                             if s.get("existing_video") and not s["review"]
-                             for t in s["tags"])
-        else:
-            want_still = self.mode == "still"
-            counts = Counter(
-                t for s in self.all_songs
-                if not s["review"] and bool(s["static"]) == want_still
-                for t in s["tags"] if t != "still"
-            )
+        pool = self._pool(self.mode)
+        skip = {"still"} if self.mode in ("watch", "still") else set()
+        counts = Counter(t for s in pool for t in s["tags"] if t not in skip)
         wanted = [t for t in rv.TAG_ORDER if counts[t]]
         if set(wanted) == set(self.chips):
             for t in wanted:
@@ -403,6 +390,28 @@ class Window(QWidget):
             self.chips[t] = b
             self.chip_bar.addWidget(b)
         self.chip_bar.addStretch(1)
+
+    def _pool(self, mode: str) -> list[dict]:
+        """
+        The songs a tab holds.
+
+        One definition, used for both the list and the number on the tab. Two
+        of them disagreed: the count said "to watch" of songs the list put in
+        'Has a video', so the tab promised work that was not there.
+        """
+        if mode == "later":
+            return [s for s in self.all_songs if s["review"] == "later"]
+        if mode == "existing":
+            # Songs that already had a video before this pipeline encoded
+            # anything. Encoding replaces it, so these are worth comparing
+            # rather than overwriting unseen.
+            return [s for s in self.all_songs
+                    if s.get("existing_video") and s["review"] != "later"]
+        want_still = mode == "still"
+        return [s for s in self.all_songs
+                if bool(s["static"]) == want_still
+                and s["review"] != "later"
+                and not s.get("existing_video")]
 
     def _set_mode(self, mode: str) -> None:
         self.mode = mode
@@ -436,20 +445,7 @@ class Window(QWidget):
             self.all_songs = rv.queue(db)
         finally:
             db.close()
-        if self.mode == "later":
-            pool = [s for s in self.all_songs if s["review"] == "later"]
-        elif self.mode == "existing":
-            # Songs that already had a video before this pipeline encoded
-            # anything. Encoding replaces it, so these are worth comparing
-            # rather than overwriting unseen.
-            pool = [s for s in self.all_songs
-                    if s.get("existing_video") and s["review"] != "later"]
-        else:
-            want_still = self.mode == "still"
-            pool = [s for s in self.all_songs
-                    if bool(s["static"]) == want_still
-                    and s["review"] != "later"
-                    and not s.get("existing_video")]
+        pool = self._pool(self.mode)
         self.songs = ([s for s in pool if self.active & set(s["tags"])]
                       if self.active else pool)
         # Reviewed songs stay at the bottom whatever the order.
@@ -459,17 +455,11 @@ class Window(QWidget):
         elif self.sort == "match_desc":
             self.songs.sort(key=lambda s: (s["review"] is not None,
                                            -(s["fp_score"] or 0), s["artist"]))
-        n_still = sum(1 for s in self.all_songs
-                      if s["static"] and not s["review"])
-        n_watch = sum(1 for s in self.all_songs
-                      if not s["static"] and not s["review"])
-        n_later = sum(1 for s in self.all_songs if s["review"] == "later")
-        n_exist = sum(1 for s in self.all_songs
-                      if s.get("existing_video") and not s["review"])
-        self.tab_watch.setText(f"To watch  {n_watch}")
-        self.tab_still.setText(f"Still images  {n_still}")
-        self.tab_later.setText(f"Saved for later  {n_later}")
-        self.tab_existing.setText(f"Has a video  {n_exist}")
+        self.tab_watch.setText(f"To watch  {len(self._pool('watch'))}")
+        self.tab_still.setText(f"Still images  {len(self._pool('still'))}")
+        self.tab_later.setText(f"Saved for later  {len(self._pool('later'))}")
+        self.tab_existing.setText(
+            f"Has a video  {len(self._pool('existing'))}")
         self._rebuild_chips()
 
         self.list.blockSignals(True)
@@ -515,17 +505,17 @@ class Window(QWidget):
             f"<span style='color:{DIM}'>offset</span> {off:+,.0f} ms "
             f"<span style='color:{DIM}'>{moves}</span> &nbsp;&nbsp;"
             f"<span style='color:{DIM}'>spread</span> "
-            f"{(s['spread_ms'] or 0):.0f} ms &nbsp;&nbsp;"
+            f"{s['spread_text']} &nbsp;&nbsp;"
             f"<span style='color:{DIM}'>match</span> "
             f"{(s['fp_score'] or 0):.0f} &nbsp;&nbsp;"
             f"<span style='color:{DIM}'>motion</span> "
             + ("still image" if s["static"] else f"{s['motion'] or 0:.2f}"))
         self.flags.setText("\n".join("— " + r for r in s["reasons"]))
 
-        if s.get("existing_video") == "foreign":
-            self.status.setText(
-                "This folder already holds a video from before this project.\n"
-                "Encoding replaces it. Compare before deciding.")
+        # The pre-existing-video notice is one of the reasons printed above
+        # now. As a status line it was overwritten by the clip-building text a
+        # moment later, so the one place it appeared was the place that could
+        # not hold it.
         score = s["fp_score"] or 0
         lines = []
         if s["static"]:
@@ -669,6 +659,19 @@ class Window(QWidget):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.play_btn.setText("Pause" if playing else "Play")
 
+    def _on_return(self) -> None:
+        """
+        Enter goes where the focus is.
+
+        The window-level shortcut runs before the key reaches the URL box, so
+        `returnPressed` never fired there: pressing Enter after pasting a link
+        approved the video you were in the middle of replacing.
+        """
+        if self.url.hasFocus() and self.url.text().strip():
+            self._act("replace")
+        else:
+            self._act("keep")
+
     def _toggle(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
@@ -687,7 +690,6 @@ class Window(QWidget):
             elif action == "later":
                 db.update(Path(self.current), review="later")
             elif action == "drop":
-                song = Path(self.current)
                 if QMessageBox.question(
                     self, "Remove this video?",
                     "This song will get no background video.\n\n"
@@ -695,22 +697,7 @@ class Window(QWidget):
                     "and matching will not pick it up again.",
                 ) != QMessageBox.StandardButton.Yes:
                     return
-                info = db.conn.execute(
-                    "SELECT source_path FROM songs WHERE song_dir = ?",
-                    (str(song),)).fetchone()
-                if info and info["source_path"]:
-                    Path(info["source_path"]).unlink(missing_ok=True)
-                for leftover in list(song.glob("video.webm")) + \
-                        list(song.glob("video.src.*")):
-                    leftover.unlink(missing_ok=True)
-                # 'skipped' is not 'ok', so no later stage will queue it.
-                db.update(song, match_status="skipped",
-                          match_note="MANUAL: no video wanted",
-                          video_id=None, source_path=None,
-                          download_status="pending", sync_status="pending",
-                          offset_ms=None, spread_ms=None, motion=None,
-                          encode_status="pending", ini_status="pending",
-                          review=None)
+                rv.drop_song(db, Path(self.current))
             else:
                 url = self.url.text().strip()
                 if not url:
@@ -731,10 +718,17 @@ class Window(QWidget):
                         "you are happy with it.")
                     return
                 if outcome != "set":
+                    # Say which thing failed. Told only that something had,
+                    # this box blamed the link for a song it could not find.
                     QMessageBox.warning(
-                        self, "Could not use that link",
-                        "No YouTube video ID could be read from it.\n"
-                        "Paste a normal watch or youtu.be link.")
+                        self, "Could not use that link", {
+                            "not-found": "This song is no longer in the "
+                                         "database. Re-run index.",
+                            "ambiguous": "More than one song matches this "
+                                         "folder, so nothing was changed.",
+                        }.get(outcome,
+                              "No YouTube video ID could be read from it.\n"
+                              "Paste a normal watch or youtu.be link."))
                     return
                 QMessageBox.information(
                     self, "Replaced",

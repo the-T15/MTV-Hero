@@ -19,6 +19,7 @@ offset is right, because the clip was built the same way YARG will play it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -55,9 +56,23 @@ TAG_LABELS = {
     "shift":     "big shift",
     "drift":     "speed drift",
     "still":     "still image",
+    "existing":  "has a video",
     "clean":     "nothing unusual",
 }
 TAG_ORDER = list(TAG_LABELS)
+
+
+def fmt_ms(value) -> str:
+    """
+    A millisecond figure as a person should read it.
+
+    A spread of -1 is the sentinel for "no window agreed", not a measurement:
+    both interfaces printed it as "-1 ms", which reads as an agreement tighter
+    than perfect rather than as no agreement at all.
+    """
+    if value is None or value < 0:
+        return "unverified"
+    return f"{value:.0f} ms"
 
 
 @dataclass
@@ -150,6 +165,15 @@ def assess(row) -> Risk:
         pts += 0.5
         why.append(("still", "still image, not footage"))
 
+    # Not doubt about the match - a note about what is at stake. It rides in
+    # the reasons because the status line it used to own is overwritten by the
+    # clip-building text a moment later, so nobody ever read it. It carries no
+    # points: an existing video says nothing about whether this one is right.
+    if row["existing_video"]:
+        why.append(("existing",
+                    "this folder already held a video from before this "
+                    "project - encoding replaces it, so compare first"))
+
     if not why:
         why.append(("clean", "nothing unusual"))
     return Risk(pts, why)
@@ -164,6 +188,7 @@ def queue(db: Database) -> list[dict]:
     for r in rows:
         risk = assess(r)
         note = r["match_note"] or ""
+        spread = None if r["sync_status"] == "unverified" else r["spread_ms"]
         out.append({
             "song_dir": r["song_dir"],
             "artist": r["artist"] or "",
@@ -173,6 +198,7 @@ def queue(db: Database) -> list[dict]:
             "channel": note.rsplit("[", 1)[-1].rstrip("]") if "[" in note else "",
             "offset_ms": r["offset_ms"],
             "spread_ms": r["spread_ms"],
+            "spread_text": fmt_ms(spread),
             "fp_score": r["fp_score"],
             "motion": r["motion"],
             "dominance": r["dominance"],
@@ -193,6 +219,35 @@ def queue(db: Database) -> list[dict]:
     return out
 
 
+def drop_song(db: Database, song: Path) -> None:
+    """
+    Record that this song wants no background video, and delete what was got.
+
+    Every measurement in the row describes the video being deleted. Left
+    behind - as `fp_score`, `dominance`, `drift_ppm`, `sync_note`, `windows`
+    and `encode_note` all were - they read afterwards as current figures for a
+    video that is not on disk and is never coming back.
+    """
+    song = Path(song)
+    row = db.conn.execute(
+        "SELECT source_path FROM songs WHERE song_dir = ?", (str(song),)
+    ).fetchone()
+    if row and row["source_path"]:
+        Path(row["source_path"]).unlink(missing_ok=True)
+    for leftover in list(song.glob("video.webm")) + list(song.glob("video.src.*")):
+        leftover.unlink(missing_ok=True)
+    # 'skipped' is not 'ok', so no later stage will queue it again.
+    db.update(song, match_status="skipped",
+              match_note="MANUAL: no video wanted",
+              video_id=None, source_path=None,
+              download_status="pending", sync_status="pending",
+              offset_ms=None, spread_ms=None, motion=None,
+              fp_score=None, dominance=None, drift_ppm=None,
+              sync_note=None, windows=None,
+              encode_status="pending", encode_note=None,
+              ini_status="pending", review=None)
+
+
 # ------------------------------------------------------------------ clip ----
 
 def source_video(row) -> Path | None:
@@ -202,6 +257,62 @@ def source_video(row) -> Path | None:
         return Path(src)
     webm = Path(row["song_dir"]) / "video.webm"
     return webm if webm.exists() else None
+
+
+def _sha8(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _state(row) -> str:
+    """
+    What the clip's contents depend on: the offset and the video file.
+
+    Anything that changes either of these makes every clip already on disk a
+    picture of a different alignment, so it has to change the name.
+    """
+    video = source_video(row)
+    size = video.stat().st_size if video is not None else 0
+    return _sha8(f"{video}|{size}|{round(row['offset_ms'] or 0.0, 3)}")
+
+
+def clip_name(row) -> str:
+    """
+    Name a proof clip after the song and the alignment it shows.
+
+    sha1, not hash(): hash() of a string is salted per process, so the same
+    song named a different file every launch and nothing was ever a cache hit.
+    The two halves are separate on purpose - the song half finds this song's
+    other clips, the state half says whether one of them is still current.
+    """
+    return f"clip_{_sha8(row['song_dir'])}_{_state(row)}.mp4"
+
+
+def full_name(row) -> str:
+    """The whole-song build, named on the same two halves as `clip_name`."""
+    return f"full_{_sha8(row['song_dir'])}_{_state(row)}.mp4"
+
+
+def purge_stale(work: Path, keep: Path) -> None:
+    """
+    Delete this song's files from earlier alignments, keeping `keep` and any
+    other file describing the same one.
+
+    A clip is only true of the offset and source video it was built from, so
+    once either moves every older file for that song is a wrong answer taking
+    up room - 371 of them, 498 MB, before the name carried the state.
+    """
+    parts = keep.name.split("_")
+    if len(parts) < 3:
+        return
+    song, state = parts[1], parts[2].split(".")[0]
+    for f in work.glob(f"*_{song}_*"):
+        bits = f.name.split(".")[0].split("_")
+        if not f.is_file() or len(bits) < 3 or bits[2] == state:
+            continue
+        try:
+            f.unlink()
+        except OSError:
+            pass          # a player still holds it open; it goes next time
 
 
 def segment_starts(row) -> list[float]:
@@ -249,15 +360,19 @@ def build_clip(row, work: Path) -> Path | None:
 
     offset = (row["offset_ms"] or 0) / 1000.0
     work.mkdir(parents=True, exist_ok=True)
-    key = abs(hash(row["song_dir"]))
-    out = work / f"clip_{key:x}.mp4"
+    out = work / clip_name(row)
+    # Before the cache check, not after: a hit is only a hit because the name
+    # already says this clip matches the current offset and video, and the
+    # same reasoning condemns everything else this song left behind.
+    purge_stale(work, out)
     if out.exists():
         return out
+    key = out.stem
 
     parts: list[Path] = []
     made: list[float] = []
     for i, chart_start in enumerate(segment_starts(row)):
-        part = work / f"seg_{key:x}_{i}.mp4"
+        part = work / f"{key}.seg{i}.mp4"
         if _render(video, stems, chart_start, max(0.0, chart_start + offset),
                    SEGMENT_SECONDS, CLIP_HEIGHT, part):
             parts.append(part)
@@ -274,7 +389,7 @@ def build_clip(row, work: Path) -> Path | None:
         parts[0].replace(out)
         return out
 
-    listing = work / f"list_{key:x}.txt"
+    listing = work / f"{key}.list.txt"
     listing.write_text("".join(f"file '{p.name}'\n" for p in parts),
                        encoding="utf-8")
     joined = subprocess.run(
@@ -343,7 +458,8 @@ def build_full(row, work: Path) -> Path | None:
     offset = (row["offset_ms"] or 0) / 1000.0
     duration = row["chart_seconds"] or au.duration_of(stems[0])
     work.mkdir(parents=True, exist_ok=True)
-    out = work / f"full_{abs(hash(row['song_dir'])):x}.mp4"
+    out = work / full_name(row)
+    purge_stale(work, out)
     if out.exists():
         return out
 
@@ -485,8 +601,31 @@ def make_handler(db_path: Path, work: Path):
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            """
+            Act on one song.
+
+            The body is read whatever happens: answering before the request
+            has been drained leaves the client reading a reset connection
+            instead of the status it was told.
+            """
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+
+            # Every path used to be treated as /api/act, so a typo or a stray
+            # request from another tab acted on a song, and a body that was
+            # not JSON came back as a traceback and a dead connection.
+            if urlparse(self.path).path != "/api/act":
+                return self._send(404, {"error": "not found"})
+            try:
+                payload = json.loads(raw or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                return self._send(400, {"error": "body is not JSON"})
+            if not isinstance(payload, dict):
+                return self._send(400, {"error": "body is not an object"})
+
             db = Database(db_path)
             try:
                 song = Path(payload.get("song", ""))
@@ -508,9 +647,15 @@ def make_handler(db_path: Path, work: Path):
     return Handler
 
 
+def make_server(db_path: Path, work: Path,
+                port: int = 8770) -> ThreadingHTTPServer:
+    """The review server, built but not started. Port 0 picks a free one."""
+    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(db_path, work))
+
+
 def serve(db_path: Path, work: Path, port: int = 8770) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(db_path, work))
-    url = f"http://127.0.0.1:{port}/"
+    server = make_server(db_path, work, port)
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Review app running at {url}")
     print("Press Ctrl+C to stop.")
     threading.Timer(0.7, lambda: _open(url)).start()
@@ -660,7 +805,7 @@ function show(dir){
   document.getElementById("f-off").innerHTML =
     `${ms(off)}<small>ms ${off < 0 ? "video waits"
       : off > 0 ? "video skips ahead" : ""}</small>`;
-  document.getElementById("f-spr").innerHTML = `${ms(s.spread_ms)}<small>ms</small>`;
+  document.getElementById("f-spr").textContent = s.spread_text;
   document.getElementById("f-fp").textContent =
     s.fp_score ? Math.round(s.fp_score) : "—";
   document.getElementById("f-mot").textContent =
