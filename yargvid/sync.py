@@ -41,6 +41,15 @@ DRIFT_R2 = 0.90          # linear fit quality required to call it drift
 MAX_DRIFT_PPM = 60000    # 6% - beyond this the video is simply wrong
 MIN_GOOD_EXCERPTS = 4
 
+# A weaker alignment may only displace the strongest one if it is supported by
+# at least this fraction of its hashes. Measured over the 281-song export: 270
+# songs chose candidate 1, 11 fell through to a weaker one, and 8 of those went
+# to a candidate with under half the support (five under a quarter, three at
+# 1%). Every large wrong move the recheck made was of that shape - candidate 1
+# locked on all seven windows but they disagreed by 41-96 ms, so a short rigid
+# section carrying a tenth of the hashes won on spread alone.
+SUPPORT_RATIO = 0.5
+
 
 @dataclass
 class SyncResult:
@@ -336,7 +345,12 @@ def estimate(
         # verification rather than the one that proved identity - 19 songs in
         # the library sit below the gate they were accepted at because of it.
         fallback: SyncResult | None = None
+        support_floor = SUPPORT_RATIO * cands[0].peak_count
         for cand in cands:
+            if cand is not cands[0] and cand.peak_count < support_floor:
+                # Not enough of the song agrees with this placement for it to
+                # overrule the strongest one, whatever its spread comes out at.
+                continue
             got = _verify(cand, chart_hi, video_hi, static_background)
             got.dominance = dominance
             got.fp_score = m.score
@@ -352,6 +366,18 @@ def estimate(
         if fallback is not None:
             fallback.dominance = dominance
             fallback.fp_score = m.score
+            # Nothing qualifying verified, and candidate 1 failed only because
+            # its windows disagreed - which is exactly the case where a wrong
+            # answer used to be preferred to it. It is still the best guess in
+            # the file, so it goes to the review queue rather than being
+            # thrown away.
+            if (fallback.status == "rejected"
+                    and fallback.windows >= MIN_GOOD_EXCERPTS):
+                fallback.status = "unverified"
+                detail = f"{fallback.reason} - " if fallback.reason else ""
+                fallback.reason = (
+                    f"strongest alignment kept as a guess - {detail}check it"
+                )
             return fallback
 
     return SyncResult(

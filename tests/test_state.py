@@ -233,7 +233,7 @@ def test_A2_fp_score_is_the_identity_score(monkeypatch):
     # Candidate 1 fails verification, candidate 2 holds. The stored fp_score
     # must be candidate 1's (the score that passed the gate), not 2's.
     c1 = fp.MatchResult(0.0, 600.0, 9000, 0.9, 20000)
-    c2 = fp.MatchResult(3.0, 36.0, 800, 0.9, 20000)
+    c2 = fp.MatchResult(3.0, 36.0, 5000, 0.9, 20000)  # >= SUPPORT_RATIO of c1
     monkeypatch.setattr(fp, "match_candidates", lambda *a, **k: [c1, c2])
 
     def fake_verify(m, chart_hi, video_hi, static):
