@@ -30,7 +30,7 @@ from scipy import ndimage
 
 # --- analysis parameters -----------------------------------------------------
 # Resolution of the coarse offset is HOP / SR seconds. 256 / 22050 = 11.6 ms,
-# which is comfortably finer than the +/-100 ms search window handed to the
+# which is comfortably finer than the +/-150 ms search window handed to the
 # GCC-PHAT refinement stage in sync.py.
 SR = 22050
 NFFT = 1024

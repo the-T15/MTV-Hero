@@ -49,7 +49,6 @@ TAG_LABELS = {
     "replaced":  "replaced",
     "weak":      "weak match",
     "channel":   "third-party",
-    "version":   "different version",
     "flat":      "no clear alignment",
     "unverified": "unverified",
     "unsteady":  "unsteady",
@@ -169,7 +168,11 @@ def assess(row) -> Risk:
     # the reasons because the status line it used to own is overwritten by the
     # clip-building text a moment later, so nobody ever read it. It carries no
     # points: an existing video says nothing about whether this one is right.
-    if row["existing_video"]:
+    #
+    # 'foreign' only. The status line this replaced tested for that value; any
+    # truthy existing_video also covers videos this pipeline put there itself,
+    # and telling you to compare against our own preview is nonsense.
+    if row["existing_video"] == "foreign":
         why.append(("existing",
                     "this folder already held a video from before this "
                     "project - encoding replaces it, so compare first"))

@@ -34,16 +34,6 @@ CANDIDATE_POOL = 12           # stop searching once this many unique survive
 DURATION_TOLERANCE = 0.30      # candidate must be within +/-30% of chart length
 MAX_CANDIDATE_SECONDS = 900    # skip hour-long uploads and full-album rips
 
-# Title preference at or above this means "clearly a real music video", and is
-# the bar for short-circuiting the search after one download.
-MUSIC_VIDEO_TITLE = 3.0
-
-# Flag for review only on a POSITIVE signal that this is not a video. A plain
-# title like 'Slipknot - Opium Of The People' scores 0.0 - unmarked, not
-# suspicious. Flagging everything without marketing keywords produced a 40%
-# flag rate, which is noise nobody reads.
-FLAG_BELOW = 0.0
-
 # Title preferences. These decide which candidate WINS among those that pass
 # the fingerprint gate, and the order they are tried in. They never let a
 # candidate through the gate - the audio alone decides identity.
@@ -137,35 +127,6 @@ def _looks_like_label(uploader: str) -> bool:
     """
     up = uploader.lower()
     return any(m in up for m in LABEL_MARKERS)
-
-
-VERSION_MARKERS = (
-    "feat", "ft.", "featuring", "remix", "live", "acoustic", "unplugged",
-    "extended", "radio edit", "single version", "album version", "demo",
-    "instrumental", "reprise", "clean", "explicit", "sped up", "slowed",
-)
-
-
-def version_mismatch(video_title: str, chart_text: str) -> str:
-    """
-    A version marker the video claims and the chart does not, or the reverse.
-
-    'Levitating' and 'Levitating Featuring DaBaby' are different arrangements
-    of the same song: a featured verse changes the structure, so no single
-    offset fits the whole track. The audio measurements cannot see this - the
-    fingerprint happily matched at 414 with seven windows agreeing - but the
-    titles say it outright.
-
-    Returns the offending marker, or an empty string.
-    """
-    vid = video_title.lower()
-    chart = chart_text.lower()
-    for m in VERSION_MARKERS:
-        in_video, in_chart = m in vid, m in chart
-        if in_video != in_chart:
-            # 'feat' also matches 'featuring'; report the first clear one.
-            return m
-    return ""
 
 
 def title_preference(title: str, uploader: str = "", chart_text: str = "") -> float:
@@ -443,10 +404,11 @@ def pick_best(
     """
     Returns (winner, all_scored_candidates, reason).
 
-    A winner must clear the fingerprint gate AND beat the runner-up clearly.
-    Two candidates scoring similarly usually means the same recording appears
-    twice (fine, take either) or that the gate is being fooled (not fine) - so
-    we require the margin and let ambiguous cases fall to manual review.
+    A winner has to clear the fingerprint gate - score and coverage - and
+    nothing else. There is no comparison against the runner-up: two candidates
+    scoring alike are usually the same recording uploaded twice, and either
+    will do. Among everything that clears the gate the winner is the one with
+    the highest title preference, with the score breaking ties.
     """
     chart_seconds = chart_audio.size / fp.SR
     if chart_seconds <= 0:

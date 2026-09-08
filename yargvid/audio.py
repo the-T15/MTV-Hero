@@ -11,7 +11,6 @@ import numpy as np
 from .fingerprint import SR
 
 AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".flac", ".m4a"}
-VIDEO_EXTS = {".webm", ".mp4", ".mkv", ".mov", ".avi"}
 
 # Stems that are not part of the song as the player hears it.
 EXCLUDE_STEMS = ("preview", "crowd", "ambient")
@@ -36,21 +35,6 @@ def find_stems(song_dir: Path) -> list[Path]:
         and p.suffix.lower() in AUDIO_EXTS
         and not any(tag in p.stem.lower() for tag in EXCLUDE_STEMS)
     ]
-
-
-def find_video(song_dir: Path) -> Path | None:
-    """Existing background video, if any. `video.*` wins over other names."""
-    vids = [
-        p
-        for p in sorted(song_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTS
-    ]
-    if not vids:
-        return None
-    for v in vids:
-        if v.stem.lower() == "video":
-            return v
-    return vids[0]
 
 
 def probe(path: Path) -> dict:

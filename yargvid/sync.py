@@ -311,14 +311,21 @@ def estimate(
     else:
         floor_ok = fp.is_same_recording(m)
     if not floor_ok:
+        # Name the gate that actually failed. `trust_identity` checks against
+        # IDENTITY_FLOOR, not the matching gate, and printing "< 45" for a
+        # score refused at 40 - or for a score that passed and failed on
+        # coverage instead - sent every reading of the note the wrong way.
+        gate = IDENTITY_FLOOR if trust_identity else fp.ACCEPT_SCORE
+        if m.score < gate:
+            why = f"score {m.score:.1f} < {gate:.0f}"
+        else:
+            why = (f"coverage {m.coverage:.2f} < "
+                   f"{fp.ACCEPT_COVERAGE:.2f}")
         return SyncResult(
             "rejected",
             fp_score=m.score,
             coverage=m.coverage,
-            reason=(
-                f"fingerprint below gate (score {m.score:.1f} < {fp.ACCEPT_SCORE}, "
-                f"coverage {m.coverage:.2f})"
-            ),
+            reason=f"fingerprint below gate ({why})",
         )
 
     weak = manual and not fp.is_same_recording(m)
@@ -381,7 +388,8 @@ def estimate(
             return fallback
 
     return SyncResult(
-        "unverified", m.offset_seconds * 1000.0, -1.0,
+        "unverified",
+        offset_ms=m.offset_seconds * 1000.0, spread_ms=-1.0,
         fp_score=m.score, coverage=m.coverage,
         reason="coarse offset only - no refinement audio supplied",
     )
@@ -408,7 +416,8 @@ def _verify(
         # here, and reporting 'ok' with spread 0 made a completely unchecked
         # guess look like the most confident result in the library.
         return SyncResult(
-            "unverified", coarse_ms, -1.0,
+            "unverified",
+            offset_ms=coarse_ms, spread_ms=-1.0,
             fp_score=m.score, coverage=m.coverage,
             reason=(f"only {usable / REFINE_SR:.0f}s of overlap - too little "
                     f"to check this offset anywhere"),
@@ -440,7 +449,8 @@ def _verify(
         # them could confirm anything. The coarse offset may be a lock onto a
         # repeated section, and nothing here would catch it. Say so instead.
         return SyncResult(
-            "unverified", coarse_ms, -1.0,
+            "unverified",
+            offset_ms=coarse_ms, spread_ms=-1.0,
             fp_score=m.score, coverage=m.coverage, excerpts=points,
             reason=(f"only {len(points)} of {N_EXCERPTS} windows could confirm "
                     f"this offset - it is a guess, check it"),
@@ -448,12 +458,13 @@ def _verify(
 
     strength = float(np.median(sharps)) if sharps else 0.0
     n_used, n_total = len(points), len(starts)
-    # Every SyncResult below passes by keyword. These three branches used
-    # positional arguments, and when `dominance` was added to the dataclass
-    # between `sharpness` and `windows` they silently shifted by one: the
-    # window count landed in dominance, coverage landed in windows_total, the
-    # excerpt list landed in coverage, and excerpts was left empty. Nothing
-    # raised, because every field from that point on is a number or a list.
+    # Every SyncResult in this file passes everything but `status` by keyword.
+    # These three branches used positional arguments, and when `dominance` was
+    # added to the dataclass between `sharpness` and `windows` they silently
+    # shifted by one: the window count landed in dominance, coverage landed in
+    # windows_total, the excerpt list landed in coverage, and excerpts was left
+    # empty. Nothing raised, because every field from that point on is a number
+    # or a list.
     times = np.array([p[0] for p in points])
     offs = np.array([p[1] for p in points])
     spread = float(offs.max() - offs.min())
@@ -461,7 +472,8 @@ def _verify(
     # Case 1: excerpts agree. Clean sync, no drift.
     if spread <= AGREE_MS:
         return SyncResult(
-            "ok", float(np.median(offs)), spread,
+            "ok",
+            offset_ms=float(np.median(offs)), spread_ms=spread,
             fp_score=m.score, sharpness=strength, coverage=m.coverage,
             excerpts=points, windows=n_used, windows_total=n_total,
         )
@@ -476,7 +488,9 @@ def _verify(
 
     if r2 >= DRIFT_R2 and abs(drift_ppm) <= MAX_DRIFT_PPM:
         return SyncResult(
-            "drift", float(intercept), spread, drift_ppm, r2,
+            "drift",
+            offset_ms=float(intercept), spread_ms=spread,
+            drift_ppm=drift_ppm, r2=r2,
             fp_score=m.score, sharpness=strength,
             windows=n_used, windows_total=n_total,
             coverage=m.coverage, excerpts=points,
@@ -489,7 +503,9 @@ def _verify(
     # applies a moving-picture test to album art.
     if static_background:
         return SyncResult(
-            "ok", float(np.median(offs)), spread, drift_ppm, r2,
+            "ok",
+            offset_ms=float(np.median(offs)), spread_ms=spread,
+            drift_ppm=drift_ppm, r2=r2,
             fp_score=m.score, sharpness=strength,
             windows=n_used, windows_total=n_total,
             coverage=m.coverage, excerpts=points,
@@ -498,7 +514,9 @@ def _verify(
 
     # Case 3: scattered. Edited video, different cut, or a bad match.
     return SyncResult(
-        "rejected", float(np.median(offs)), spread, drift_ppm, r2,
+        "rejected",
+        offset_ms=float(np.median(offs)), spread_ms=spread,
+        drift_ppm=drift_ppm, r2=r2,
         fp_score=m.score, sharpness=strength,
         windows=n_used, windows_total=n_total,
         coverage=m.coverage, excerpts=points,

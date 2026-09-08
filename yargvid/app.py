@@ -28,7 +28,6 @@ from PySide6.QtCore import (QObject, QRunnable, Qt, QThreadPool, QUrl, Signal,
                             Slot)
 from PySide6.QtGui import (QDesktopServices, QFont, QKeySequence,
                            QShortcut)
-from PySide6.QtCore import QUrl as _QUrl
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit,
@@ -413,6 +412,19 @@ class Window(QWidget):
                 and s["review"] != "later"
                 and not s.get("existing_video")]
 
+    def _todo(self, mode: str) -> int:
+        """
+        How many songs in a tab are still waiting on a decision.
+
+        The list keeps showing songs you have kept - at the bottom, so the
+        order is stable and you can go back to one. The number on the tab is
+        not for that: it answers "how much is left", and counting work already
+        done meant every tab stayed the same size however long you worked.
+
+        'later' is not a decision, it is a deferral, so those still count.
+        """
+        return sum(1 for s in self._pool(mode) if s["review"] != "keep")
+
     def _set_mode(self, mode: str) -> None:
         self.mode = mode
         self.tab_watch.setChecked(mode == "watch")
@@ -455,11 +467,10 @@ class Window(QWidget):
         elif self.sort == "match_desc":
             self.songs.sort(key=lambda s: (s["review"] is not None,
                                            -(s["fp_score"] or 0), s["artist"]))
-        self.tab_watch.setText(f"To watch  {len(self._pool('watch'))}")
-        self.tab_still.setText(f"Still images  {len(self._pool('still'))}")
-        self.tab_later.setText(f"Saved for later  {len(self._pool('later'))}")
-        self.tab_existing.setText(
-            f"Has a video  {len(self._pool('existing'))}")
+        self.tab_watch.setText(f"To watch  {self._todo('watch')}")
+        self.tab_still.setText(f"Still images  {self._todo('still')}")
+        self.tab_later.setText(f"Saved for later  {self._todo('later')}")
+        self.tab_existing.setText(f"Has a video  {self._todo('existing')}")
         self._rebuild_chips()
 
         self.list.blockSignals(True)
@@ -603,7 +614,7 @@ class Window(QWidget):
         if not s or not s.get("video_id"):
             return
         at = int(s.get("clip_video_s") or 0)
-        QDesktopServices.openUrl(_QUrl(
+        QDesktopServices.openUrl(QUrl(
             "https://www.youtube.com/watch?v=" + s["video_id"] + "&t=" + str(at) + "s"))
 
     def _clear_segments(self) -> None:

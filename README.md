@@ -43,12 +43,13 @@ Installed by you:
 ```
 pip install -e .              # the tool, plus yt-dlp, numpy and scipy
 pip install -e ".[desktop]"   # the same, plus PySide6 for the review app
-yargvid doctor                # checks ffmpeg, ffprobe, libvpx and yt-dlp
+yargvid doctor                # checks ffmpeg, ffprobe, libvpx, yt-dlp, JS
 ```
 
-`doctor` checks those four individually, including whether your ffmpeg actually
-has libvpx — the "essentials" builds often do not. It does not check your
-Python version or your JavaScript runtime.
+`doctor` checks each of those individually, including whether your ffmpeg
+actually has libvpx — the "essentials" builds often do not — and whether one of
+deno, node or bun is on your PATH for yt-dlp to solve YouTube's challenges with.
+It does not check your Python version.
 
 If `doctor` reports yt-dlp missing straight after a successful install, pip's
 scripts directory is probably not on your PATH.
@@ -88,25 +89,63 @@ yargvid encode --reviewed
 yargvid ini
 ```
 
-Every command takes `--limit N`, and `--sample` draws a random selection rather
-than the alphabetically first — song folders cluster by source, so a sequential
-batch measures one corner of a library.
+`--limit N` and `--sample` are options of `yargvid` itself, so they go **before**
+the subcommand: `yargvid --limit 100 --sample match`, not `yargvid match
+--limit 100`. `--sample` draws a random selection rather than the alphabetically
+first — song folders cluster by source, so a sequential batch measures one
+corner of a library. `--db` works the same way.
 
 Start with a sample. `yargvid --limit 100 --sample match` tells you your match
 rate, your static-background rate and your failure modes before committing
 hours to the whole library.
+
+### The pipeline
+
+| command | what it does |
+|---|---|
+| `doctor` | check ffmpeg, ffprobe, libvpx, yt-dlp and a JavaScript runtime |
+| `index` | scan a song library into the database |
+| `match` | find and fingerprint candidate videos |
+| `download` | fetch the winning video |
+| `sync` | measure and verify the offset |
+| `review` | watch proof clips and approve, defer, replace or drop |
+| `encode` | transcode to VP8/WebM |
+| `ini` | write `video_start_time` into `song.ini` |
+| `retry <stage>` | send a stage's failures back to pending (`--all` for every row) |
+
+Stage flags worth knowing:
+
+| flag | command | what it does |
+|---|---|---|
+| `--gate N` | `match` | override the fingerprint accept score for this run |
+| `--redo` | `match` | re-attempt only songs that previously failed |
+| `--recheck` | `sync` | recompute already-synced songs and write only what changed |
+| `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
+| `--skip-static` | `encode` | leave album-art backgrounds unencoded |
+| `--skip-existing` | `encode` | leave folders that already hold a `video.webm` |
+| `--reviewed` | `encode` | only songs you approved by eye |
+| `--mark` | `videos` | record which songs already had a video, for review |
+| `--force` | `export` | overwrite the output CSV (it refuses by default) |
+
+`--cookies` and `--sleep` apply to `match`, `download` and `check`.
 
 ### Diagnostics
 
 | command | question it answers |
 |---|---|
 | `status` | how far along is each stage |
-| `candidates <song>` | what else was considered, and why did this win |
-| `offsets <song>` | what alignments exist, and how strong is each |
-| `blocks <song>` | does this video have internal cuts, and where |
-| `inspect <song>` | where does this offset come from |
+| `candidates` | what else was considered for a song, and why did this win |
+| `offsets` | what alignments exist for a song, and how strong is each |
+| `blocks` | does this video have internal cuts, and where |
+| `inspect` | where does this song's offset come from (offline) |
 | `videos` | which folders already contain a video |
+| `links` | the chosen video URL for every matching song |
+| `reviewed` | which songs you have confirmed by eye |
+| `diagnose` | one song's match, verbosely, from search to gate |
 | `export` | every measurement for every song, as CSV |
+
+Each of `candidates`, `offsets`, `blocks`, `inspect`, `links` and `diagnose`
+takes a substring of the song folder path.
 
 ### Fixing individual songs
 
@@ -114,6 +153,8 @@ hours to the whole library.
 yargvid check <song> <url>     # test a video before committing to it
 yargvid set <song> <url>       # use this video instead
 yargvid offset <song> <ms>     # set the offset by hand and lock it
+yargvid links <song>           # which video is it using
+yargvid retry sync             # send failed syncs back to pending
 ```
 
 ---
@@ -124,8 +165,11 @@ yargvid offset <song> <ms>     # set the offset by hand and lock it
 yargvid review
 ```
 
-Three lists: songs worth watching, songs whose background is a still image, and
-songs saved for later. Each song plays a 36-second clip — three 12-second
+Four tabs: songs worth watching, songs whose background is a still image,
+songs whose folder already held a video ("Has a video"), and songs saved for
+later. The number on a tab is what is left to decide, not how many songs it
+lists — approved songs stay in the list, at the bottom. Each song plays a
+36-second clip — three 12-second
 segments from across the track — with the offset already applied by ffmpeg, so
 what you see is what the game will show.
 
@@ -137,7 +181,10 @@ most likely to be wrong appear first, and the rest can be spot-checked.
 
 Buttons: keep, replace with a link, defer, or drop the video entirely.
 
-`--browser` serves the same interface over HTTP for machines without Qt.
+`--browser` serves a cut-down version over HTTP for machines without Qt: keep
+and replace with a link, and nothing else. Defer and drop, the clip segments and
+the filter chips are in the window only. Building the browser version out to
+match is deferred rather than planned.
 
 ---
 
@@ -181,17 +228,27 @@ metric available. That is why the review step exists.
 - One video file per song folder — YARG may load the wrong one otherwise.
 - Songs with no music video get a static background, or none.
 - Videos shorter than the chart leave the end of the song without footage.
+- `song.ini` is matched case-sensitively on Linux, so a folder holding
+  `Song.ini` is not indexed and never gets a `video_start_time`. On Windows
+  the filesystem hides the difference.
 
 ---
 
 ## Tests
 
 ```
+python -m pytest -q           the state-rule suite in tests/, no ffmpeg needed
+```
+
+`pytest` collects `tests/` only. The two scripts in the project root are run
+with `python`, as they always have been:
+
+```
 python test_fingerprint.py    offset accuracy, sign convention, rejection margin
 python test_e2e.py            the full pipeline against a synthetic song folder
 ```
 
-Both need ffmpeg on PATH.
+Both of those need ffmpeg on PATH.
 
 ---
 

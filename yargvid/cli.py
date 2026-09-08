@@ -215,8 +215,8 @@ def cmd_match(args, db: Database) -> None:
     # reads ACCEPT_SCORE at call time, so this reaches every gate check for the
     # rest of the run without threading a parameter through five call sites.
     if getattr(args, "gate", None):
+        print(f"fingerprint gate: {args.gate} (default {fp.ACCEPT_SCORE})")
         fp.ACCEPT_SCORE = args.gate
-        print(f"fingerprint gate: {args.gate} (default 60.0)")
 
     work = Path(args.work)
     if getattr(args, "redo", False):
@@ -333,10 +333,11 @@ def cmd_sync(args, db: Database) -> None:
         # which on Windows is a large share of the total time.
         motion = row["motion"] if recheck and row["motion"] is not None \
             else enc.motion_score(src)
+        manual = (row["match_note"] or "").startswith("MANUAL")
         res = sy.estimate(
             chart, video, chart_hi, video_hi,
             trust_identity=True, static_background=enc.is_static(motion),
-            manual=(row["match_note"] or "").startswith("MANUAL:"),
+            manual=manual,
         )
         db.update(
             d,
@@ -388,6 +389,12 @@ def cmd_sync(args, db: Database) -> None:
             f"    video_start_time = {res.video_start_time}  "
             f"spread {res.spread_ms:.0f} ms{agreed}{flag}"
         )
+        if manual:
+            # Every hand-picked video, not only the ones whose fingerprint is
+            # weak - those are the only ones estimate() mentions in its reason.
+            # The offset above was measured against a video you chose, which is
+            # what decides how the numbers next to it should be read.
+            print("    your pick - video chosen by hand")
         if enc.is_static(motion):
             print(f"    [STATIC IMAGE - motion {motion:.2f}, no moving footage]")
         vid_len = au.duration_of(src)
@@ -889,7 +896,6 @@ def cmd_candidates(args, db: Database) -> None:
 
 def cmd_review(args, db: Database) -> None:
     """Open the review app - a desktop window by default."""
-    from pathlib import Path as _P
     n = len(rv.queue(db))
     if n == 0:
         print("Nothing synced yet - run match, download and sync first.")
@@ -897,7 +903,7 @@ def cmd_review(args, db: Database) -> None:
     print(f"{n} songs ready to check.")
 
     if getattr(args, "browser", False):
-        return rv.serve(_P(args.db), _P(args.work), args.port)
+        return rv.serve(Path(args.db), Path(args.work), args.port)
     try:
         from . import app as desktop
     except ImportError:
@@ -905,7 +911,7 @@ def cmd_review(args, db: Database) -> None:
               "  pip install PySide6      (desktop window)\n"
               "  yargvid review --browser (no extra install)")
         return
-    sys.exit(desktop.run(_P(args.db), _P(args.work)))
+    sys.exit(desktop.run(Path(args.db), Path(args.work)))
 
 
 def cmd_offsets(args, db: Database) -> None:
@@ -981,8 +987,30 @@ def cmd_offsets(args, db: Database) -> None:
 
     print()
     print("  sharpness = how cleanly the waveforms line up at that offset.")
-    print("  If the correct offset is clearly sharper, that is the signal to")
-    print("  select on. If they are similar, correlation cannot tell them apart.")
+    print("  Diagnostic only. Choosing the offset by sharpness was tried and")
+    print("  reverted: over 128 songs it moved 50 offsets on margins that were")
+    print("  noise (111 vs 111, 91 vs 90), scattering them by +/-80s. See NOTES.")
+
+
+def cmd_links(args, db: Database) -> None:
+    """
+    The chosen video URL for every song matching a folder substring.
+
+    Read-only, and the one thing the database holds that cannot be opened from
+    anywhere else: `candidates` shows what was considered and `inspect` shows
+    where the offset came from, but neither hands you a link you can paste.
+    """
+    rows = db.conn.execute(
+        "SELECT * FROM songs WHERE song_dir LIKE ? AND video_id IS NOT NULL "
+        "ORDER BY artist, title",
+        (f"%{args.pattern}%",),
+    ).fetchall()
+    if not rows:
+        print(f"No song with a chosen video matches {args.pattern!r}")
+        return
+    for r in rows:
+        print(f"https://youtu.be/{r['video_id']}  "
+              f"{r['artist']} - {r['title']}")
 
 
 def cmd_reviewed(args, db: Database) -> None:
@@ -1051,9 +1079,14 @@ def cmd_export(args, db: Database) -> None:
     print(f"Measuring {len(rows)} songs -> {out}")
     print("This decodes and fingerprints each one; expect a few seconds each.")
 
+    # manual_video / manual_offset: a hand-picked video and a hand-set offset
+    # are decisions, not measurements, and any rule measured over this file has
+    # to be able to leave them out. Without the columns they were invisible -
+    # the two approvals the fall-through rule touched had to be found by hand.
     fields = ["artist", "title", "reviewed", "sync_status", "chart_s",
               "video_s", "chart_lead_s", "video_lead_s", "chosen_offset_ms",
               "spread_ms", "fp_score", "motion", "covers_song", "dominance",
+              "manual_video", "manual_offset",
               "video_id", "channel", "blocks", "largest_block_pct",
               "largest_block_offset_ms"]
     for i in range(1, 5):
@@ -1090,6 +1123,9 @@ def cmd_export(args, db: Database) -> None:
                 "spread_ms": r["spread_ms"], "fp_score": r["fp_score"],
                 "motion": r["motion"],
                 "covers_song": int(covers_song(video_s, off, chart_s)),
+                "manual_video": int(note.startswith("MANUAL")),
+                "manual_offset": int(
+                    (r["sync_note"] or "").startswith("MANUAL")),
                 "video_id": r["video_id"] or "",
                 "channel": note.rsplit("[", 1)[-1].rstrip("]") if "[" in note else "",
             }
@@ -1301,8 +1337,8 @@ def cmd_status(args, db: Database) -> None:
 
     flagged = db.flagged_matches()
     if flagged:
-        print(f"\n{len(flagged)} matched but flagged as NOT a music video "
-              f"(lyric/audio/gameplay). First 15:")
+        print(f"\n{len(flagged)} matched but flagged as a still image "
+              f"(audio-only upload or a '- Topic' channel). First 15:")
         for row in flagged[:15]:
             note = (row["match_note"] or "").removeprefix("REVIEW: ")
             m = row["motion"]
@@ -1323,12 +1359,22 @@ def cmd_retry(args, db: Database) -> None:
     print(f"Reset {n} rows in stage '{args.stage}' to pending")
 
 
+JS_RUNTIMES = ("deno", "node", "bun")
+
+
 def cmd_doctor(args, db: Database) -> None:
+    # Without a JavaScript runtime yt-dlp cannot solve YouTube's signature
+    # challenges, and the response comes back with every audio and video
+    # format stripped out - which reads as a download bug rather than as a
+    # missing tool. Any one of the three will do.
+    js = [t for t in JS_RUNTIMES if enc.have(t)]
     checks = [
         ("ffmpeg", enc.have("ffmpeg")),
         ("ffprobe", enc.have("ffprobe")),
         ("yt-dlp", enc.have("yt-dlp")),
         ("libvpx (VP8) in ffmpeg", enc.check_ffmpeg_vp8()),
+        ("a JavaScript runtime for yt-dlp "
+         f"({'/'.join(JS_RUNTIMES)}{': ' + js[0] if js else ''})", bool(js)),
     ]
     for name, ok in checks:
         print(f"  [{'ok' if ok else 'MISSING'}] {name}")
@@ -1357,7 +1403,8 @@ def main(argv=None) -> int:
     s.add_argument("--sleep", type=float, default=1.0,
                    help="seconds between yt-dlp requests (default 1.0)")
     s.add_argument("--gate", type=float, default=None,
-                   help="fingerprint accept score (default 60)")
+                   help=f"fingerprint accept score "
+                        f"(default {fp.ACCEPT_SCORE:.0f})")
     s.add_argument("--redo", action="store_true",
                    help="only re-attempt songs that previously failed")
     s.set_defaults(fn=cmd_match)
@@ -1441,7 +1488,7 @@ def main(argv=None) -> int:
     s.add_argument("pattern", help="substring of the song folder path")
     s.set_defaults(fn=cmd_inspect)
 
-    s = sub.add_parser("review", help="open the review app in a browser")
+    s = sub.add_parser("review", help="open the review app in a window")
     s.add_argument("--browser", action="store_true",
                    help="serve in a browser instead of a window")
     s.add_argument("--port", type=int, default=8770)
@@ -1461,6 +1508,10 @@ def main(argv=None) -> int:
     s.add_argument("--mark", action="store_true",
                    help="record which songs already have a video, for review")
     s.set_defaults(fn=cmd_videos)
+
+    s = sub.add_parser("links", help="print the chosen video URL per song")
+    s.add_argument("pattern", help="substring of the song folder path")
+    s.set_defaults(fn=cmd_links)
 
     s = sub.add_parser("reviewed", help="songs you confirmed by eye")
     s.add_argument("--verbose", action="store_true",
