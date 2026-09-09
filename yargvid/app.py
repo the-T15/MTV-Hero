@@ -370,25 +370,28 @@ class Window(QWidget):
         skip = {"still"} if self.mode in ("watch", "still") else set()
         counts = Counter(t for s in pool for t in s["tags"] if t not in skip)
         wanted = [t for t in rv.TAG_ORDER if counts[t]]
-        if set(wanted) == set(self.chips):
+        if set(wanted) != set(self.chips):
+            while self.chip_bar.count():
+                w = self.chip_bar.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+            self.chips.clear()
             for t in wanted:
-                self.chips[t].setText(f"{rv.TAG_LABELS[t]} {counts[t]}")
-            return
-
-        while self.chip_bar.count():
-            w = self.chip_bar.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        self.chips.clear()
-        for t in wanted:
-            b = QPushButton(f"{rv.TAG_LABELS[t]} {counts[t]}")
-            b.setObjectName("chip")
-            b.setCheckable(True)
+                b = QPushButton("")
+                b.setObjectName("chip")
+                b.setCheckable(True)
+                b.toggled.connect(lambda on, tag=t: self._toggle_tag(tag, on))
+                self.chips[t] = b
+                self.chip_bar.addWidget(b)
+            self.chip_bar.addStretch(1)
+        for t, b in self.chips.items():
+            b.setText(f"{rv.TAG_LABELS[t]} {counts[t]}")
+            # `active` is the state and the chips only show it. Setting them
+            # unblocked calls back into _toggle_tag, which refreshes, which
+            # rebuilds the chips.
+            b.blockSignals(True)
             b.setChecked(t in self.active)
-            b.toggled.connect(lambda on, tag=t: self._toggle_tag(tag, on))
-            self.chips[t] = b
-            self.chip_bar.addWidget(b)
-        self.chip_bar.addStretch(1)
+            b.blockSignals(False)
 
     def _pool(self, mode: str) -> list[dict]:
         """
@@ -446,7 +449,14 @@ class Window(QWidget):
             self.list.setCurrentRow(0)
 
     def _toggle_tag(self, tag: str, on: bool) -> None:
-        self.active.add(tag) if on else self.active.discard(tag)
+        """
+        One filter at a time.
+
+        Two chips at once meant "weak AND third-party", a narrower list than
+        either chip promised - clicking a second chip emptied the pane, which
+        reads as the filter being broken rather than as an intersection.
+        """
+        self.active = {tag} if on else set()
         self.refresh()
         if self.list.count():
             self.list.setCurrentRow(0)
@@ -555,45 +565,62 @@ class Window(QWidget):
                 "same recording as your chart, so the offset is reliable.")
         self.explain.setText(" ".join(lines))
 
-        if s["static"]:
-            # No clip. There is nothing to watch and no timing to judge, so
-            # building one would cost a couple of seconds to show a frozen
-            # frame. Decide from the title and channel.
-            self.status.setText(
-                "Album art for the whole song - nothing to watch.\n"
-                "Keep it, or paste a link to a real video.")
-            self.keep_btn.setText("Keep the still")
-            self.window_lbl.setText("")
-        else:
-            self.keep_btn.setText("Looks right")
-            self.status.setText("Building a clip from the middle of the song…")
-            self.full_btn.setEnabled(True)
-            self._clear_segments()
-            self.window_lbl.setText("")
-            job = ClipJob(self.db_path, self.work, s["song_dir"])
-            job.signals.done.connect(self._clip_ready)
-            self._job = job                 # keep alive until it finishes
-            self.pool.start(job)
+        # A still gets a clip like everything else. Skipping the build
+        # saved a couple of seconds and cost the only way to tell an
+        # album-art upload from a video the motion figure got wrong - and
+        # even a real still has to be looked at to know it is the right
+        # artwork for this song.
+        self.keep_btn.setText("Keep the still" if s["static"]
+                              else "Looks right")
+        self.status.setText("Building a clip from the middle of the song…")
+        self.full_btn.setEnabled(True)
+        self._clear_segments()
+        self.window_lbl.setText("")
+        job = ClipJob(self.db_path, self.work, s["song_dir"])
+        job.signals.done.connect(self._clip_ready)
+        self._job = job                 # keep alive until it finishes
+        self.pool.start(job)
 
     @Slot(str, str, str)
     def _clip_ready(self, song_dir: str, path: str, error: str) -> None:
         if song_dir != self.current:
             return                                  # user already moved on
         if error:
+            # Clear the player before reporting. The failed song used to be
+            # described by whatever was still loaded from the last one -
+            # frame, segment buttons, window text and all - which reads as a
+            # clip that built fine and happens to be wrong.
+            self.player.stop()
+            self.player.setSource(QUrl())
+            self._clear_segments()
+            self.window_lbl.setText("")
             self.status.setText(error)
             return
         self.status.setText("")
         self.full_btn.setEnabled(True)
         # Describe what the file actually holds, not what was requested.
-        starts = [] if Path(path).name.startswith("full_") \
-            else rv.clip_segments(Path(path))
+        full = Path(path).name.startswith("full_")
+        info = rv.clip_info(Path(path))
+        starts = [] if full else (info.get("segments") or [])
         self._show_segments(starts)
         if starts:
-            self.window_lbl.setText(
-                f"{len(starts)} x {rv.SEGMENT_SECONDS}s from song "
-                + ", ".join(self._mmss(x) for x in starts))
-        elif Path(path).name.startswith("full_"):
-            self.window_lbl.setText("full song")
+            label = (f"{len(starts)} x {rv.SEGMENT_SECONDS}s from song "
+                     + ", ".join(self._mmss(x) for x in starts))
+        elif full:
+            label = "full song"
+        else:
+            label = ""
+        # Say it outright when the footage runs out before the song does.
+        # Fewer windows than usual is the symptom; this is the cause, and
+        # without it a short clip reads as a build that went wrong.
+        song = next((x for x in self.songs if x["song_dir"] == self.current),
+                    None)
+        reach = info.get("reach_seconds")
+        chart = (song or {}).get("chart_seconds") or 0.0
+        if reach is not None and chart and reach < chart - 1.0:
+            label += (" · video ends at " + self._mmss(reach)
+                      + " of " + self._mmss(chart))
+        self.window_lbl.setText(label)
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
 

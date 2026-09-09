@@ -208,6 +208,7 @@ def queue(db: Database) -> list[dict]:
             "existing_video": r["existing_video"],
             "static": r["motion"] is not None and enc.is_static(r["motion"]),
             "review": r["review"],
+            "chart_seconds": r["chart_seconds"],
             "segment_starts": segment_starts(r),
             "clip_chart_s": clip_times(r)[0],
             "clip_video_s": clip_times(r)[1],
@@ -318,7 +319,38 @@ def purge_stale(work: Path, keep: Path) -> None:
             pass          # a player still holds it open; it goes next time
 
 
-def segment_starts(row) -> list[float]:
+def video_reach(video_seconds: float, offset_ms: float) -> float:
+    """
+    The song time at which the video runs out.
+
+    The offset is subtracted, not added: a video held back (negative offset)
+    is still playing after its own duration has elapsed, so it reaches
+    further into the song than its length suggests.
+    """
+    return video_seconds - (offset_ms or 0.0) / 1000.0
+
+
+def _inside(starts: list[float], floor: float, offset: float,
+            video_seconds: float | None) -> list[float]:
+    """
+    Drop the starts whose window runs off the end of the video.
+
+    A segment placed past the end is not a short segment, it is a scrap:
+    ffmpeg has nothing to encode, exits 0, and the concat that follows writes
+    a container whose header lies about its own length.
+    """
+    if not video_seconds or video_seconds <= 0:
+        return starts
+    last = video_seconds - SEGMENT_SECONDS - offset    # latest start that fits
+    fits = [s for s in starts if s <= last + 0.01]
+    if fits:
+        return fits
+    # Nothing landed. One window ending exactly at the last frame is still
+    # worth watching; a video too short to hold even that is not.
+    return [last] if last >= floor else []
+
+
+def segment_starts(row, video_seconds: float | None = None) -> list[float]:
     """
     Where in the song each segment begins.
 
@@ -326,11 +358,16 @@ def segment_starts(row) -> list[float]:
     different section length lines up in the chorus and drifts in the verse,
     which is invisible if you sample the song once - so sample it three times,
     spread across the track.
+
+    With `video_seconds` given, only the placements the video actually covers
+    survive. Closing Time asked for a window at 3:56 of a video that ends at
+    3:52, and got one back.
     """
     offset = (row["offset_ms"] or 0) / 1000.0
     duration = row["chart_seconds"] or 0.0
     if duration <= 0:
-        return [max(0.0, -offset) + 4.0]
+        floor = max(0.0, -offset) + 4.0
+        return _inside([floor], floor, offset, video_seconds)
 
     floor = max(0.0, -offset) + 2.0            # video must exist by then
     ceiling = max(floor, duration - SEGMENT_SECONDS - 1)
@@ -339,7 +376,7 @@ def segment_starts(row) -> list[float]:
         start = min(max(duration * frac, floor), ceiling)
         if not out or start - out[-1] >= SEGMENT_SECONDS:
             out.append(start)
-    return out or [floor]
+    return _inside(out or [floor], floor, offset, video_seconds)
 
 
 def clip_times(row) -> tuple[float, float]:
@@ -362,6 +399,7 @@ def build_clip(row, work: Path) -> Path | None:
         return None
 
     offset = (row["offset_ms"] or 0) / 1000.0
+    video_seconds = au.duration_of(video)
     work.mkdir(parents=True, exist_ok=True)
     out = work / clip_name(row)
     # Before the cache check, not after: a hit is only a hit because the name
@@ -374,19 +412,38 @@ def build_clip(row, work: Path) -> Path | None:
 
     parts: list[Path] = []
     made: list[float] = []
-    for i, chart_start in enumerate(segment_starts(row)):
+    for i, chart_start in enumerate(segment_starts(row, video_seconds)):
         part = work / f"{key}.seg{i}.mp4"
-        if _render(video, stems, chart_start, max(0.0, chart_start + offset),
-                   SEGMENT_SECONDS, CLIP_HEIGHT, part):
-            parts.append(part)
-            made.append(round(chart_start, 2))
+        ok, why = _render(video, stems, chart_start,
+                          max(0.0, chart_start + offset),
+                          SEGMENT_SECONDS, CLIP_HEIGHT, part)
+        # Measure the piece rather than trusting the exit code. Running off
+        # the end of the video leaves ffmpeg nothing to encode and it still
+        # exits 0; the 1.4-second scrap that came back was then concatenated
+        # into a file whose header claimed 72 s of video against 24 s of
+        # audio, and the button for it seeked into an index that was not there.
+        if ok and au.duration_of(part) < SEGMENT_SECONDS - 0.5:
+            ok, why = False, f"{part.name}: too short to be a segment"
+        if not ok:
+            print(f"    segment at {chart_start:.1f}s dropped - "
+                  + " ".join(why.split())[:160])
+            part.unlink(missing_ok=True)
+            continue
+        parts.append(part)
+        made.append(round(chart_start, 2))
     if not parts:
         return None
 
-    # Record which segments actually rendered. A segment can fail - the video
-    # may not reach that far - and claiming three when the file holds two is
-    # how a clip ends up not matching its own description.
-    _sidecar(out).write_text(json.dumps(made), encoding="utf-8")
+    # The sidecar describes the file, not the request. A segment can fail -
+    # the video may not reach that far - and claiming three when the file
+    # holds two is how a clip ends up not matching its own description. The
+    # reach goes in too, so the window can say where the footage stops.
+    _sidecar(out).write_text(json.dumps({
+        "segments": made,
+        "video_seconds": round(video_seconds, 3),
+        "reach_seconds": round(video_reach(video_seconds,
+                                           row["offset_ms"] or 0.0), 3),
+    }), encoding="utf-8")
 
     if len(parts) == 1:
         parts[0].replace(out)
@@ -410,18 +467,38 @@ def _sidecar(clip: Path) -> Path:
     return clip.with_suffix(".segments.json")
 
 
+def clip_info(clip: Path) -> dict:
+    """
+    What a built clip holds: its segments, and how far its video reaches.
+
+    Sidecars written before the reach was recorded are bare lists; they are
+    still true about the segments, so they are read as such rather than
+    thrown away and rebuilt.
+    """
+    try:
+        data = json.loads(_sidecar(clip).read_text(encoding="utf-8"))
+    except Exception:
+        return {"segments": []}
+    if isinstance(data, list):
+        return {"segments": data}
+    return data if isinstance(data, dict) else {"segments": []}
+
+
 def clip_segments(clip: Path) -> list[float]:
     """Song times of the segments actually present in a built clip."""
-    try:
-        return json.loads(_sidecar(clip).read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    return clip_info(clip).get("segments") or []
 
 
 def _render(video: Path, stems: list[Path], chart_start: float,
             video_start: float, seconds: float, height: int,
-            out: Path) -> bool:
-    """One aligned segment: video seeked to its matching point, chart audio."""
+            out: Path) -> tuple[bool, str]:
+    """
+    One aligned segment: video seeked to its matching point, chart audio.
+
+    Returns ffmpeg's own account of what happened along with the verdict. It
+    used to be thrown away, so a build that produced nothing could only say
+    "ffmpeg could not build a clip" - true, and no help at all.
+    """
     cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin",
            "-ss", f"{video_start:.3f}", "-t", f"{seconds}", "-i", str(video)]
     for st in stems:
@@ -441,10 +518,16 @@ def _render(video: Path, stems: list[Path], chart_start: float,
             "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100",
             "-movflags", "+faststart", "-shortest", str(out)]
     try:
-        return (subprocess.run(cmd, capture_output=True, timeout=300).returncode == 0
-                and out.exists())
+        done = subprocess.run(cmd, capture_output=True, timeout=300,
+                              encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        return False
+        return False, f"ffmpeg timed out after 300s on {out.name}"
+    except OSError as exc:
+        return False, f"ffmpeg could not be run: {exc}"
+    err = (done.stderr or "").strip()
+    if done.returncode == 0 and out.exists():
+        return True, err
+    return False, err or f"ffmpeg exited {done.returncode} with nothing to say"
 
 
 def build_full(row, work: Path) -> Path | None:
