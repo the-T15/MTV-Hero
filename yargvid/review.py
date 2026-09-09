@@ -23,6 +23,7 @@ import hashlib
 import json
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,9 +34,10 @@ from . import encode as enc
 from . import fingerprint as fp
 from .db import Database
 
-SEGMENT_SECONDS = 12
-SEGMENT_POINTS = (0.25, 0.55, 0.85)   # fractions of the song to sample
-CLIP_SECONDS = SEGMENT_SECONDS * len(SEGMENT_POINTS)
+# 15 s, not 12: twelve was long enough to see a beat land and too short to
+# see one drift away from the beat after it.
+SEGMENT_SECONDS = 15
+CLIP_SECONDS = SEGMENT_SECONDS * 3
 CLIP_HEIGHT = 360
 FULL_HEIGHT = 360
 
@@ -49,16 +51,24 @@ TAG_LABELS = {
     "replaced":  "replaced",
     "weak":      "weak match",
     "channel":   "third-party",
+    "audio":     "audio only",
     "flat":      "no clear alignment",
     "unverified": "unverified",
     "unsteady":  "unsteady",
     "shift":     "big shift",
     "drift":     "speed drift",
+    "short":     "video ends early",
     "still":     "still image",
     "existing":  "has a video",
     "clean":     "nothing unusual",
 }
 TAG_ORDER = list(TAG_LABELS)
+
+
+def fmt_mmss(seconds: float) -> str:
+    """A number of seconds as minutes and seconds."""
+    whole = int(round(max(0.0, seconds)))
+    return f"{whole // 60}:{whole % 60:02d}"
 
 
 def fmt_ms(value) -> str:
@@ -134,6 +144,16 @@ def assess(row) -> Risk:
             pts += 3
             why.append(("channel", f"third-party channel: {chan}"))
 
+    # `match` writes the REVIEW: prefix when the winning title says lyric
+    # video, audio upload or gameplay capture - the uploader telling you
+    # there is nothing to watch, before motion is ever measured. It reached
+    # the row and then stopped: nothing in either interface read it. One
+    # point, because the timing can still be perfect; it is the picture that
+    # is not worth having.
+    if note.startswith("REVIEW:"):
+        pts += 1
+        why.append(("audio", "titled as audio, not a video"))
+
     # Peak dominance is recorded but deliberately NOT ranked on. Measured
     # across 172 songs, 21 of the 71 confirmed correct by eye fell below 5x -
     # including two the user called perfect - so a low figure does not mean a
@@ -158,6 +178,19 @@ def assess(row) -> Risk:
     if row["sync_status"] == "drift":
         pts += 4
         why.append(("drift", "video runs at a different speed"))
+
+    # The song outlasting the footage is a fact about the file, not a doubt
+    # about the match, and nothing in the window said it - you found out by
+    # watching the background stop. Five seconds of slack: an outro fading
+    # under a black frame is not worth flagging.
+    chart = row["chart_seconds"] or 0.0
+    vid = row["video_seconds"]
+    if vid and chart > 0:
+        missing = chart - video_reach(vid, row["offset_ms"] or 0.0)
+        if missing > 5.0:
+            pts += 2
+            why.append(("short",
+                        f"video ends {fmt_mmss(missing)} before the song"))
 
     motion = row["motion"]
     if motion is not None and enc.is_static(motion):
@@ -209,7 +242,11 @@ def queue(db: Database) -> list[dict]:
             "static": r["motion"] is not None and enc.is_static(r["motion"]),
             "review": r["review"],
             "chart_seconds": r["chart_seconds"],
-            "segment_starts": segment_starts(r),
+            "video_seconds": r["video_seconds"],
+            "reach_seconds": (video_reach(r["video_seconds"],
+                                          r["offset_ms"] or 0.0)
+                              if r["video_seconds"] else None),
+            "segment_starts": segment_starts(r, r["video_seconds"]),
             "clip_chart_s": clip_times(r)[0],
             "clip_video_s": clip_times(r)[1],
             "risk": round(risk.score, 1),
@@ -292,8 +329,14 @@ def clip_name(row) -> str:
 
 
 def full_name(row) -> str:
-    """The whole-song build, named on the same two halves as `clip_name`."""
-    return f"full_{_sha8(row['song_dir'])}_{_state(row)}.mp4"
+    """
+    The whole-song build, named on the same two halves as `clip_name`.
+
+    Matroska, because the video stream is copied rather than re-encoded and
+    whatever YouTube sent - VP9, AV1, h264 - has to go in the container as
+    it is.
+    """
+    return f"full_{_sha8(row['song_dir'])}_{_state(row)}.mkv"
 
 
 def purge_stale(work: Path, keep: Path) -> None:
@@ -330,53 +373,44 @@ def video_reach(video_seconds: float, offset_ms: float) -> float:
     return video_seconds - (offset_ms or 0.0) / 1000.0
 
 
-def _inside(starts: list[float], floor: float, offset: float,
-            video_seconds: float | None) -> list[float]:
-    """
-    Drop the starts whose window runs off the end of the video.
-
-    A segment placed past the end is not a short segment, it is a scrap:
-    ffmpeg has nothing to encode, exits 0, and the concat that follows writes
-    a container whose header lies about its own length.
-    """
-    if not video_seconds or video_seconds <= 0:
-        return starts
-    last = video_seconds - SEGMENT_SECONDS - offset    # latest start that fits
-    fits = [s for s in starts if s <= last + 0.01]
-    if fits:
-        return fits
-    # Nothing landed. One window ending exactly at the last frame is still
-    # worth watching; a video too short to hold even that is not.
-    return [last] if last >= floor else []
-
-
 def segment_starts(row, video_seconds: float | None = None) -> list[float]:
     """
-    Where in the song each segment begins.
+    Where in the song each window begins: the start, the middle and the end.
 
-    One window can only prove the offset at one moment. A video with a
-    different section length lines up in the chorus and drifts in the verse,
-    which is invisible if you sample the song once - so sample it three times,
-    spread across the track.
+    Sampling at 25/55/85% of the song put all three windows in the body of
+    the track, which is where choruses are - the most repetitive part, where
+    a wrong lock looks most convincing. It never showed the lead-in, which is
+    where the offset is easiest to judge, and never showed the last bar,
+    which is where drift has had the whole song to accumulate and where a
+    video that runs out shows itself.
 
-    With `video_seconds` given, only the placements the video actually covers
-    survive. Closing Time asked for a window at 3:56 of a video that ends at
-    3:52, and got one back.
+    So: one window a second after the footage starts, one ending a second
+    before it ends, one halfway between. A window is kept only if it is a
+    full window clear of the one before it, so a short song gets two windows
+    or one rather than three overlapping views of the same ten seconds.
     """
     offset = (row["offset_ms"] or 0) / 1000.0
-    duration = row["chart_seconds"] or 0.0
-    if duration <= 0:
-        floor = max(0.0, -offset) + 4.0
-        return _inside([floor], floor, offset, video_seconds)
+    chart = row["chart_seconds"] or 0.0
+    begins = max(0.0, -offset)          # song time the footage starts at
+    ends = chart if chart > 0 else begins + SEGMENT_SECONDS + 2.0
+    if video_seconds:
+        # Where the footage stops, if that is before the song does. Both ends
+        # come from the same two numbers, so no window can be placed outside
+        # the video by construction.
+        ends = min(ends, video_reach(video_seconds, offset * 1000.0))
 
-    floor = max(0.0, -offset) + 2.0            # video must exist by then
-    ceiling = max(floor, duration - SEGMENT_SECONDS - 1)
-    out = []
-    for frac in SEGMENT_POINTS:
-        start = min(max(duration * frac, floor), ceiling)
+    first = begins + 1.0
+    last = ends - SEGMENT_SECONDS - 1.0
+    if last < first:
+        # Too little footage to put a window at each end of it. Take the one
+        # that fits, as late as it can sit without running past the end.
+        return [max(begins, min(first, ends - SEGMENT_SECONDS))]
+
+    out: list[float] = []
+    for start in (first, (first + last) / 2.0, last):
         if not out or start - out[-1] >= SEGMENT_SECONDS:
             out.append(start)
-    return _inside(out or [floor], floor, offset, video_seconds)
+    return out
 
 
 def clip_times(row) -> tuple[float, float]:
@@ -410,13 +444,22 @@ def build_clip(row, work: Path) -> Path | None:
         return out
     key = out.stem
 
+    # Three ffmpeg runs that share nothing, on a machine with more than one
+    # core: run them together. The wait before a song appears is the whole
+    # cost of reviewing 1500 of them, and it was three waits in a row.
+    jobs = []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        for i, chart_start in enumerate(segment_starts(row, video_seconds)):
+            part = work / f"{key}.seg{i}.mp4"
+            jobs.append((chart_start, part, pool.submit(
+                _render, video, stems, chart_start,
+                max(0.0, chart_start + offset),
+                SEGMENT_SECONDS, CLIP_HEIGHT, part)))
+
     parts: list[Path] = []
     made: list[float] = []
-    for i, chart_start in enumerate(segment_starts(row, video_seconds)):
-        part = work / f"{key}.seg{i}.mp4"
-        ok, why = _render(video, stems, chart_start,
-                          max(0.0, chart_start + offset),
-                          SEGMENT_SECONDS, CLIP_HEIGHT, part)
+    for chart_start, part, job in jobs:
+        ok, why = job.result()
         # Measure the piece rather than trusting the exit code. Running off
         # the end of the video leaves ffmpeg nothing to encode and it still
         # exits 0; the 1.4-second scrap that came back was then concatenated
@@ -534,7 +577,24 @@ def build_full(row, work: Path) -> Path | None:
     """
     The whole song with the offset baked in, for scrubbing through.
 
-    Slower to build than the sampled clip, so it is only made on request.
+    The video stream is copied, not re-encoded: nothing about it changes, and
+    re-encoding a four-minute video to move its audio took minutes per song
+    on a step that exists to answer one question quickly.
+
+    So the offset is applied entirely on the audio side, and in the direction
+    the offset means. Video time is chart time plus the offset, so:
+
+    - positive offset - the video runs ahead of the song. Play the video from
+      its own start and delay the song into place with `adelay`, which pads
+      with real silence. Not `-itsoffset`: a negative start timestamp is a
+      note in the container asking the player to be late, and players
+      disagree about whether to honour it. Silence is not a request.
+    - negative offset - the song starts before there is any footage. There is
+      nothing to show for those seconds, so seek each stem past them and let
+      both streams start together.
+
+    Either way the length is the chart plus the offset: the extra lead-in for
+    a positive one, the dropped intro for a negative one.
     """
     video = source_video(row)
     stems = au.find_stems(Path(row["song_dir"]))
@@ -549,34 +609,41 @@ def build_full(row, work: Path) -> Path | None:
     if out.exists():
         return out
 
-    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
-    if offset >= 0:
-        cmd += ["-ss", f"{offset:.3f}", "-i", str(video)]
-    else:
-        # Negative offset holds the video back, so shift its timestamps
-        # instead of seeking - the song starts before the video does.
-        cmd += ["-itsoffset", f"{-offset:.3f}", "-i", str(video)]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin", "-i", str(video)]
     for st in stems:
+        if offset < 0:
+            cmd += ["-ss", f"{-offset:.3f}"]
         cmd += ["-i", str(st)]
 
     n = len(stems)
+    chain = []
     if n == 1:
-        amap = "1:a"
+        tap = "[1:a]"
     else:
         mix = "".join(f"[{i}:a]" for i in range(1, n + 1))
-        cmd += ["-filter_complex", f"{mix}amix=inputs={n}:normalize=0[a]"]
+        chain.append(f"{mix}amix=inputs={n}:normalize=0[m]")
+        tap = "[m]"
+    if offset > 0:
+        chain.append(f"{tap}adelay={round(offset * 1000)}:all=1[a]")
         amap = "[a]"
+    else:
+        amap = tap if chain else "1:a"
+    if chain:
+        cmd += ["-filter_complex", ";".join(chain)]
 
-    cmd += ["-map", "0:v:0", "-map", amap, "-t", f"{duration:.2f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-            "-vf", f"scale=-2:{FULL_HEIGHT},setsar=1", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-            "-movflags", "+faststart", str(out)]
+    cmd += ["-map", "0:v:0", "-map", amap,
+            "-t", f"{max(0.0, duration + offset):.2f}",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "160k", "-ac", "2", str(out)]
     try:
-        done = subprocess.run(cmd, capture_output=True, timeout=1200)
+        done = subprocess.run(cmd, capture_output=True, timeout=1200,
+                              encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return None
-    return out if done.returncode == 0 and out.exists() else None
+    if done.returncode == 0 and out.exists():
+        return out
+    print("    full build failed - " + " ".join((done.stderr or "").split())[:160])
+    return None
 
 
 # ---------------------------------------------------------------- server ----

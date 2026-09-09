@@ -96,7 +96,8 @@ class Database:
                           ("dominance", "REAL"),
                           ("existing_video", "TEXT"),
                           ("download_note", "TEXT"),
-                          ("windows", "INTEGER")):
+                          ("windows", "INTEGER"),
+                          ("video_seconds", "REAL")):
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
         self.conn.commit()

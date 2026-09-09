@@ -486,9 +486,14 @@ class Window(QWidget):
         self.list.blockSignals(True)
         self.list.clear()
         for s in self.songs:
+            # The video's own title, then who uploaded it. The channel
+            # alone answered "is this official?" and nothing else - not which
+            # of six uploads of the song this is, which is the question you
+            # are actually looking at the row to answer.
             item = QListWidgetItem(
                 f"{s['artist']} — {s['title']}\n"
-                f"{s['channel'] or s['video']}\n"
+                + (f"{s['video']} · {s['channel']}" if s["channel"]
+                   else s["video"]) + "\n"
                 + ("checked" if s["review"]
                    else " · ".join(rv.TAG_LABELS[t] for t in s["tags"])))
             if s["review"]:
@@ -515,9 +520,13 @@ class Window(QWidget):
         self.current = s["song_dir"]
         self.player.stop()
 
-        self.head.setText(s["title"])
-        self.by.setText(f"{s['artist']} · {s['video']}"
-                        + (f" · {s['channel']}" if s["channel"] else ""))
+        # The song above, the video below. They were run together on one
+        # line with the artist in the middle, so the two titles read as one
+        # string and it took a second every time to see where the song
+        # stopped and the upload started.
+        self.head.setText(f"{s['artist']} - {s['title']}")
+        self.by.setText(s["video"] + (f" · {s['channel']}"
+                                      if s["channel"] else ""))
 
         off = s["offset_ms"] or 0
         moves = ("video waits" if off < 0 else
@@ -633,8 +642,7 @@ class Window(QWidget):
 
     @staticmethod
     def _mmss(seconds: float) -> str:
-        s = int(round(seconds))
-        return f"{s // 60}:{s % 60:02d}"
+        return rv.fmt_mmss(seconds)
 
     def _open_source(self) -> None:
         s = next((x for x in self.songs if x["song_dir"] == self.current), None)

@@ -333,6 +333,10 @@ def cmd_sync(args, db: Database) -> None:
         # which on Windows is a large share of the total time.
         motion = row["motion"] if recheck and row["motion"] is not None \
             else enc.motion_score(src)
+        # Measured here anyway, for the SHORT line below. Storing it is what
+        # lets review flag a song that runs out without opening the file
+        # again - 1,423 ffprobe calls to answer a question sync already asked.
+        vid_len = au.duration_of(src)
         manual = (row["match_note"] or "").startswith("MANUAL")
         res = sy.estimate(
             chart, video, chart_hi, video_hi,
@@ -350,6 +354,7 @@ def cmd_sync(args, db: Database) -> None:
             motion=motion,
             dominance=res.dominance,
             windows=res.windows,
+            video_seconds=vid_len,
         )
         if recheck:
             # The measurements above are refreshed unconditionally: they
@@ -397,7 +402,6 @@ def cmd_sync(args, db: Database) -> None:
             print("    your pick - video chosen by hand")
         if enc.is_static(motion):
             print(f"    [STATIC IMAGE - motion {motion:.2f}, no moving footage]")
-        vid_len = au.duration_of(src)
         chart_len = chart.size / fp.SR
         covered = vid_len - res.offset_ms / 1000.0
         if chart_len > 0 and not covers_song(vid_len, res.offset_ms, chart_len):
@@ -1234,6 +1238,24 @@ def cmd_videos(args, db: Database) -> None:
     pipeline but very much visible to YARG, which has been playing it with
     whatever offset produced it. Encoding overwrites both.
     """
+    if getattr(args, "lengths", False):
+        # Everything synced before the column existed has no length, and the
+        # review window cannot say "this video ends early" without one. The
+        # file is on disk; ffprobe reads the header, it does not decode.
+        todo = db.conn.execute(
+            "SELECT song_dir, source_path FROM songs "
+            "WHERE video_seconds IS NULL AND source_path IS NOT NULL "
+            "ORDER BY song_dir").fetchall()
+        done = 0
+        for r in todo:
+            src = Path(r["source_path"])
+            if not src.exists():
+                continue
+            db.update(Path(r["song_dir"]), video_seconds=au.duration_of(src))
+            done += 1
+        print(f"Measured {done} of {len(todo)} videos still missing a length.")
+        return
+
     rows = db.conn.execute("SELECT * FROM songs ORDER BY artist, title").fetchall()
     encoded, previews, foreign, sources, missing = [], [], [], [], []
 
@@ -1507,6 +1529,9 @@ def main(argv=None) -> int:
                    help="write the full list to a CSV instead of printing")
     s.add_argument("--mark", action="store_true",
                    help="record which songs already have a video, for review")
+    s.add_argument("--lengths", action="store_true",
+                   help="measure and store the length of every source video "
+                        "that has none yet")
     s.set_defaults(fn=cmd_videos)
 
     s = sub.add_parser("links", help="print the chosen video URL per song")
