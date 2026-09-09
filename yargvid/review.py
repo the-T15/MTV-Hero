@@ -37,7 +37,13 @@ from .db import Database
 # 15 s, not 12: twelve was long enough to see a beat land and too short to
 # see one drift away from the beat after it.
 SEGMENT_SECONDS = 15
-CLIP_SECONDS = SEGMENT_SECONDS * 3
+# The last window is twice as long. The end of the song is where drift has
+# had the whole track to accumulate and where a short video runs out, and
+# fifteen seconds there was not long enough to watch either happen.
+END_SECONDS = 30
+# An end window shorter than this is not worth building: it shows less than
+# a phrase, and the intro window already covers that much of the footage.
+MIN_END_SECONDS = 5
 CLIP_HEIGHT = 360
 FULL_HEIGHT = 360
 
@@ -300,8 +306,6 @@ def queue(db: Database) -> list[dict]:
                                           r["offset_ms"] or 0.0)
                               if r["video_seconds"] else None),
             "segment_starts": segment_starts(r, r["video_seconds"]),
-            "clip_chart_s": clip_times(r)[0],
-            "clip_video_s": clip_times(r)[1],
             "risk": round(risk.score, 1),
             "reasons": risk.reasons,
             "tags": risk.tags,
@@ -426,9 +430,10 @@ def video_reach(video_seconds: float, offset_ms: float) -> float:
     return video_seconds - (offset_ms or 0.0) / 1000.0
 
 
-def segment_starts(row, video_seconds: float | None = None) -> list[float]:
+def segment_windows(row, video_seconds: float | None = None
+                    ) -> list[tuple[float, float]]:
     """
-    Where in the song each window begins: the start, the middle and the end.
+    Where in the song each window begins and how long it runs.
 
     Sampling at 25/55/85% of the song put all three windows in the body of
     the track, which is where choruses are - the most repetitive part, where
@@ -438,47 +443,66 @@ def segment_starts(row, video_seconds: float | None = None) -> list[float]:
     video that runs out shows itself.
 
     So: one window a second after the footage starts, one ending a second
-    before it ends, one halfway between. A window is kept only if it is a
-    full window clear of the one before it, so a short song gets two windows
-    or one rather than three overlapping views of the same ten seconds.
+    before it ends, one halfway between. The end window is `END_SECONDS`
+    rather than `SEGMENT_SECONDS` - fifteen seconds of the run-out was not
+    long enough to see drift arrive or the picture stop.
+
+    Both ends come from the same two numbers, so no window can be placed
+    outside the footage by construction. A window is kept only if it is a
+    full window clear of the one before it: a short song gets two windows or
+    one rather than three overlapping views of the same ten seconds. When the
+    intro and the end collide, the end window shrinks into what is left
+    rather than moving - the run-out is the part of it worth watching.
     """
     offset = (row["offset_ms"] or 0) / 1000.0
     chart = row["chart_seconds"] or 0.0
     begins = max(0.0, -offset)          # song time the footage starts at
     ends = chart if chart > 0 else begins + SEGMENT_SECONDS + 2.0
     if video_seconds:
-        # Where the footage stops, if that is before the song does. Both ends
-        # come from the same two numbers, so no window can be placed outside
-        # the video by construction.
+        # Where the footage stops, if that is before the song does.
         ends = min(ends, video_reach(video_seconds, offset * 1000.0))
 
     first = begins + 1.0
-    last = ends - SEGMENT_SECONDS - 1.0
-    if last < first:
+    stop = ends - 1.0                   # the last window finishes here
+    if stop - SEGMENT_SECONDS < first:
         # Too little footage to put a window at each end of it. Take the one
         # that fits, as late as it can sit without running past the end.
-        return [max(begins, min(first, ends - SEGMENT_SECONDS))]
+        start = max(begins, min(first, ends - SEGMENT_SECONDS))
+        return [(start, float(SEGMENT_SECONDS))]
 
-    out: list[float] = []
-    for start in (first, (first + last) / 2.0, last):
-        if not out or start - out[-1] >= SEGMENT_SECONDS:
-            out.append(start)
+    out: list[tuple[float, float]] = [(first, float(SEGMENT_SECONDS))]
+    floor = first + SEGMENT_SECONDS
+    end_start, end_len = stop - END_SECONDS, float(END_SECONDS)
+    if end_start < floor:
+        end_start, end_len = floor, stop - floor
+        if end_len < MIN_END_SECONDS:
+            return out
+
+    middle = (first + end_start) / 2.0
+    if middle >= floor and end_start - middle >= SEGMENT_SECONDS:
+        out.append((middle, float(SEGMENT_SECONDS)))
+    out.append((end_start, end_len))
     return out
 
 
-def clip_times(row) -> tuple[float, float]:
-    """First segment's (chart_seconds, video_seconds), for display."""
-    offset = (row["offset_ms"] or 0) / 1000.0
-    chart_start = segment_starts(row)[0]
-    return chart_start, max(0.0, chart_start + offset)
+def segment_starts(row, video_seconds: float | None = None) -> list[float]:
+    """Song times the windows begin at, without their lengths."""
+    return [s for s, _ in segment_windows(row, video_seconds)]
 
 
 def build_clip(row, work: Path) -> Path | None:
     """
-    Mux the aligned video against the mixed chart stems into one short file.
+    Mux each window of the aligned video against the mixed chart stems.
 
     Sync is correct by construction: the offset is applied by seeking, so
     there are no two clocks to drift apart. What plays is what YARG will show.
+
+    Three windows are three files. Joining them was work spent defending a
+    join nothing needed - a segment that came back short broke the container
+    it was concatenated into, and the buttons then seeked into an index that
+    was not there. Separate files cannot do that to each other, so a bad
+    piece costs its own window and nothing else. The first one is returned;
+    the sidecar names them all.
     """
     video = source_video(row)
     stems = au.find_stems(Path(row["song_dir"]))
@@ -493,74 +517,69 @@ def build_clip(row, work: Path) -> Path | None:
     # already says this clip matches the current offset and video, and the
     # same reasoning condemns everything else this song left behind.
     purge_stale(work, out)
-    if out.exists():
-        return out
+    # A hit is the sidecar plus every file it names. The sidecar alone is not
+    # enough: one segment deleted by hand, or left half-written by a crash,
+    # would otherwise be reported as a built clip with a file missing under it.
+    cached = clip_info(out).get("files") or []
+    if cached and all((work / name).is_file() for name in cached):
+        return work / cached[0]
     key = out.stem
 
-    # Three ffmpeg runs that share nothing, on a machine with more than one
-    # core: run them together. The wait before a song appears is the whole
-    # cost of reviewing 1500 of them, and it was three waits in a row.
+    # Renders that share nothing, on a machine with more than one core: run
+    # them together. The wait before a song appears is the whole cost of
+    # reviewing 1500 of them, and it was three waits in a row.
     jobs = []
     with ThreadPoolExecutor(max_workers=3) as pool:
-        for i, chart_start in enumerate(segment_starts(row, video_seconds)):
+        for i, (chart_start, length) in enumerate(
+                segment_windows(row, video_seconds)):
             part = work / f"{key}.seg{i}.mp4"
-            jobs.append((chart_start, part, pool.submit(
+            jobs.append((chart_start, length, part, pool.submit(
                 _render, video, stems, chart_start,
                 max(0.0, chart_start + offset),
-                SEGMENT_SECONDS, CLIP_HEIGHT, part)))
+                length, CLIP_HEIGHT, part)))
 
-    parts: list[Path] = []
-    made: list[float] = []
-    for chart_start, part, job in jobs:
+    made: list[tuple[float, float, Path]] = []
+    for chart_start, length, part, job in jobs:
         ok, why = job.result()
         # Measure the piece rather than trusting the exit code. Running off
         # the end of the video leaves ffmpeg nothing to encode and it still
-        # exits 0; the 1.4-second scrap that came back was then concatenated
-        # into a file whose header claimed 72 s of video against 24 s of
-        # audio, and the button for it seeked into an index that was not there.
-        if ok and au.duration_of(part) < SEGMENT_SECONDS - 0.5:
+        # exits 0, and a 1.4-second scrap named as a fifteen-second window is
+        # a file that lies about itself.
+        if ok and au.duration_of(part) < length - 0.5:
             ok, why = False, f"{part.name}: too short to be a segment"
         if not ok:
             print(f"    segment at {chart_start:.1f}s dropped - "
                   + " ".join(why.split())[:160])
             part.unlink(missing_ok=True)
             continue
-        parts.append(part)
-        made.append(round(chart_start, 2))
-    if not parts:
+        made.append((chart_start, length, part))
+    if not made:
         return None
 
-    # The sidecar describes the file, not the request. A segment can fail -
-    # the video may not reach that far - and claiming three when the file
-    # holds two is how a clip ends up not matching its own description. The
-    # reach goes in too, so the window can say where the footage stops.
+    # The sidecar describes the files, not the request. A segment can fail -
+    # the video may not reach that far - and claiming three when two were
+    # made is how a clip ends up not matching its own description. The reach
+    # goes in too, so the window can say where the footage stops.
     _sidecar(out).write_text(json.dumps({
-        "segments": made,
+        "segments": [round(s, 2) for s, _, _ in made],
+        "lengths": [round(ln, 2) for _, ln, _ in made],
+        "files": [part.name for _, _, part in made],
         "video_seconds": round(video_seconds, 3),
         "reach_seconds": round(video_reach(video_seconds,
                                            row["offset_ms"] or 0.0), 3),
     }), encoding="utf-8")
-
-    if len(parts) == 1:
-        parts[0].replace(out)
-        return out
-
-    listing = work / f"{key}.list.txt"
-    listing.write_text("".join(f"file '{p.name}'\n" for p in parts),
-                       encoding="utf-8")
-    joined = subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-nostdin", "-f", "concat",
-         "-safe", "0", "-i", str(listing), "-c", "copy",
-         "-movflags", "+faststart", str(out)],
-        capture_output=True, timeout=300)
-    listing.unlink(missing_ok=True)
-    for part in parts:
-        part.unlink(missing_ok=True)
-    return out if joined.returncode == 0 and out.exists() else None
+    return made[0][2]
 
 
-def _sidecar(clip: Path) -> Path:
-    return clip.with_suffix(".segments.json")
+def _sidecar(path: Path) -> Path:
+    """
+    The one sidecar describing a build, from any file belonging to it.
+
+    Keyed on the name before the first dot, because a build is now several
+    files - `clip_<song>_<state>.seg0.mp4`, `.seg1.mp4` - that share a stem
+    and must share one description of themselves.
+    """
+    return path.with_name(path.name.split(".")[0] + ".segments.json")
 
 
 def clip_info(clip: Path) -> dict:
@@ -693,10 +712,60 @@ def build_full(row, work: Path) -> Path | None:
                               encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return None
-    if done.returncode == 0 and out.exists():
-        return out
-    print("    full build failed - " + " ".join((done.stderr or "").split())[:160])
-    return None
+    if done.returncode != 0 or not out.exists():
+        print("    full build failed - "
+              + " ".join((done.stderr or "").split())[:160])
+        return None
+    # Where this file can actually be seeked to. The video stream was copied,
+    # so its keyframes are whatever YouTube's encoder chose - as much as ten
+    # seconds apart - and a seek between two of them leaves the picture
+    # frozen while the decoder waits for the next one.
+    _sidecar(out).write_text(json.dumps({
+        "keyframes": keyframes_of(out),
+        "video_seconds": round(au.duration_of(video), 3),
+    }), encoding="utf-8")
+    return out
+
+
+def keyframes_of(path: Path) -> list[float]:
+    """
+    The seconds at which a file can be seeked to without decoding to get there.
+
+    Read from the packet flags rather than by decoding: ffprobe reports the K
+    flag straight out of the container index, so a four-minute video is a
+    tenth of a second's work.
+    """
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_packets",
+           "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0",
+           str(path)]
+    try:
+        done = subprocess.run(cmd, capture_output=True, timeout=120,
+                              encoding="utf-8", errors="replace")
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if done.returncode != 0:
+        return []
+    out: list[float] = []
+    for line in (done.stdout or "").splitlines():
+        bits = line.strip().split(",")
+        if len(bits) < 2 or "K" not in bits[-1]:
+            continue
+        try:
+            out.append(round(float(bits[0]), 3))
+        except ValueError:
+            continue          # a packet with no timestamp says nothing
+    return sorted(out)
+
+
+def snap_to_keyframe(ms: int, keyframes: list[float]) -> int:
+    """
+    The latest keyframe at or before `ms`, in milliseconds.
+
+    Unchanged when nothing is known about the file: a seek to where you asked
+    is a better answer than a seek to zero.
+    """
+    before = [k for k in keyframes if k * 1000.0 <= ms + 1]
+    return int(round(max(before) * 1000)) if before else int(ms)
 
 
 # ---------------------------------------------------------------- server ----

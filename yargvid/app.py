@@ -24,21 +24,30 @@ from pathlib import Path
 # which buries the app's own output. Set before Qt is imported.
 os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg=false")
 
-from PySide6.QtCore import (QObject, QRunnable, Qt, QThreadPool, QUrl, Signal,
-                            Slot)
-from PySide6.QtGui import (QDesktopServices, QFont, QKeySequence,
-                           QShortcut)
+from PySide6.QtCore import (QEvent, QObject, QPoint, QRect, QRunnable, Qt,
+                            QThreadPool, QTimer, QUrl, Signal)
+from PySide6.QtGui import (QDesktopServices, QFont, QKeySequence, QShortcut,
+                           QWindow)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QPushButton,
-                               QSizePolicy, QSlider, QSplitter,
-                               QVBoxLayout, QWidget)
+                               QSizePolicy, QSlider, QSplitter, QStyle,
+                               QStyleOptionSlider, QVBoxLayout, QWidget)
 from collections import Counter
 
 from . import review as rv
 from .db import Database
+
+# Held down, an arrow key walks the list a row at a time and each row used to
+# start an ffmpeg run. The window then stalled behind a queue of builds for
+# songs nobody was looking at any more. Selecting is instant; building waits
+# to see whether you have stopped.
+BUILD_DELAY_MS = 300
+
+# How far the skip buttons move.
+SKIP_MS = 10000
 
 BASE, PANEL, LINE = "#12161c", "#171d25", "#2a323d"
 INK, DIM = "#d9dfe7", "#79848f"
@@ -77,26 +86,30 @@ QLabel#status {{ color:{DIM}; padding:14px; }}
 
 
 class ClipSignals(QObject):
-    done = Signal(str, str, str)          # song_dir, path, error
+    done = Signal(str, str, str, int)     # song_dir, path, error, token
 
 
 class ClipJob(QRunnable):
     """Build one proof clip off the UI thread."""
 
     def __init__(self, db_path: Path, work: Path, song_dir: str,
-                 full: bool = False):
+                 full: bool = False, token: int = 0):
         super().__init__()
         self.db_path, self.work, self.song_dir = db_path, work, song_dir
         self.full = full
+        # The serial of the build this job is. Checking the song alone was
+        # not enough: nudging the offset re-selects the same song, so the
+        # build at the old offset came back matching `current` and landed on
+        # top of the one that replaced it.
+        self.token = token
         self.signals = ClipSignals()
 
     def _emit(self, path: str, error: str) -> None:
         try:
-            self.signals.done.emit(self.song_dir, path, error)
+            self.signals.done.emit(self.song_dir, path, error, self.token)
         except RuntimeError:
             pass          # the window moved on and dropped this job
 
-    @Slot()
     def run(self):
         db = Database(self.db_path)
         try:
@@ -130,6 +143,60 @@ class ClipJob(QRunnable):
             db.close()
 
 
+class Timeline(QSlider):
+    """
+    A timeline that goes where you click it.
+
+    A plain QSlider treats a click on the groove as a page step: clicking
+    three quarters of the way along a four-minute song moved it ten seconds,
+    which reads as the control being broken rather than as a page. The press
+    jumps to the position under the pointer and holds the slider down, so a
+    press-and-drag continues from there and the release is a release of a
+    drag that started where you meant it to.
+    """
+
+    def _value_at(self, x: int) -> int:
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        style = self.style()
+        groove = style.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                      QStyle.SubControl.SC_SliderGroove, self)
+        handle = style.subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                      QStyle.SubControl.SC_SliderHandle, self)
+        # The handle's own width is not part of the travel, and the pointer
+        # grabs its middle: both ends have to come off before the fraction
+        # means anything.
+        span = max(1, groove.width() - handle.width())
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(),
+            x - handle.width() // 2 - groove.x(), span)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(True)
+            self.setSliderPosition(self._value_at(int(ev.position().x())))
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self.isSliderDown():
+            self.setSliderPosition(self._value_at(int(ev.position().x())))
+            ev.accept()
+            return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        # QSlider's own release handler ignores an event it did not see the
+        # press for, which would leave the slider down for ever and never
+        # emit sliderReleased.
+        if self.isSliderDown():
+            self.setSliderDown(False)
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
+
+
 class Window(QWidget):
     def __init__(self, db_path: Path, work: Path):
         super().__init__()
@@ -142,6 +209,12 @@ class Window(QWidget):
         self.sort = "doubt"
         self.chips: dict[str, QPushButton] = {}
         self.current: str | None = None
+        # What is on screen, as opposed to what was asked for.
+        self._token = 0                   # serial of the latest build
+        self._pending_full = False
+        self._files: list[str] = []       # the segment files, in window order
+        self._full = False                # a whole-song build is loaded
+        self._keyframes: list[float] = []
 
         self.setWindowTitle("Backgrounds to check")
         self.resize(1180, 760)
@@ -258,13 +331,20 @@ class Window(QWidget):
         self.restart_btn = QPushButton("Restart")
         self.restart_btn.setObjectName("chip")
         self.restart_btn.clicked.connect(self._restart)
+        self.back_btn = QPushButton("← 10 s")
+        self.back_btn.setObjectName("chip")
+        self.back_btn.clicked.connect(lambda: self._skip(-SKIP_MS))
+        self.fwd_btn = QPushButton("10 s →")
+        self.fwd_btn.setObjectName("chip")
+        self.fwd_btn.clicked.connect(lambda: self._skip(SKIP_MS))
         # Without the timestamps there is no way to check the clip against the
         # source, which leaves the offset unverifiable outside the game.
         self.window_lbl = QLabel("")
         self.window_lbl.setObjectName("hint")
-        self.scrub = QSlider(Qt.Orientation.Horizontal)
+        self.scrub = Timeline(Qt.Orientation.Horizontal)
         self.scrub.setRange(0, 0)
-        self.scrub.sliderMoved.connect(self.player.setPosition)
+        self.scrub.sliderMoved.connect(self._on_scrub_moved)
+        self.scrub.sliderReleased.connect(self._on_scrub_released)
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(
             lambda ms: self.scrub.setRange(0, ms))
@@ -282,11 +362,13 @@ class Window(QWidget):
         self.open_btn.setObjectName("chip")
         self.open_btn.clicked.connect(self._open_source)
         self.open_btn.setToolTip(
-            "Opens the video on YouTube at the same moment the clip shows, so "
-            "you can compare directly.")
+            "Opens the video on YouTube so you can compare it against the "
+            "clip.")
         transport = QHBoxLayout()
         transport.setSpacing(6)
         transport.addWidget(self.play_btn)
+        transport.addWidget(self.back_btn)
+        transport.addWidget(self.fwd_btn)
         transport.addWidget(self.restart_btn)
         transport.addWidget(self.full_btn)
         transport.addWidget(self.open_btn)
@@ -422,8 +504,20 @@ class Window(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(split)
 
+        # One timer, restarted by every selection: the build starts for
+        # whatever song you are on when it finally fires.
+        self.build_timer = QTimer(self)
+        self.build_timer.setSingleShot(True)
+        self.build_timer.timeout.connect(self._start_build)
+
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle)
         QShortcut(QKeySequence(Qt.Key.Key_Return), self, self._on_return)
+        # Application-level, not on the widget: QVideoWidget draws into a
+        # QWindow of its own inside a container, and a press on that window
+        # never reaches the widget's mousePressEvent.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self.refresh()
 
     # ------------------------------------------------------------------ data
@@ -639,17 +733,51 @@ class Window(QWidget):
         # artwork for this song.
         self.keep_btn.setText("Keep the still" if s["static"]
                               else "Looks right")
-        self.status.setText("Building a clip from the middle of the song…")
         self.full_btn.setEnabled(True)
+        self._queue_build(full=False)
+
+    def _clear_player(self) -> None:
+        """
+        Leave nothing of the last song on screen.
+
+        Whatever is loaded describes the song it was built for. Held while the
+        next one builds, it reads as this song's clip - the frame, the segment
+        buttons and the window text all belong to a different alignment.
+        """
+        self.player.stop()
+        self.player.setSource(QUrl())
         self._clear_segments()
         self.window_lbl.setText("")
-        job = ClipJob(self.db_path, self.work, s["song_dir"])
+        self._files = []
+        self._full = False
+        self._keyframes = []
+
+    def _queue_build(self, full: bool) -> None:
+        """Clear the player now; start the build once the selection settles."""
+        self._token += 1
+        self._pending_full = full
+        self._clear_player()
+        self.status.setText("Building the full song - this takes longer…"
+                            if full else "Building the clips…")
+        self.build_timer.start(BUILD_DELAY_MS)
+
+    def _start_build(self) -> None:
+        if self.current is None:
+            return
+        job = ClipJob(self.db_path, self.work, self.current,
+                      full=self._pending_full, token=self._token)
         job.signals.done.connect(self._clip_ready)
         self._job = job                 # keep alive until it finishes
         self.pool.start(job)
 
-    @Slot(str, str, str)
-    def _clip_ready(self, song_dir: str, path: str, error: str) -> None:
+    def _clip_ready(self, song_dir: str, path: str, error: str,
+                    token: int | None = None) -> None:
+        # No token means the caller is not a build - the tests drive this
+        # directly - so it is trusted. A token that is not the current one is
+        # a build for a song, or for an offset, that has since been left
+        # behind.
+        if token is not None and token != self._token:
+            return
         if song_dir != self.current:
             return                                  # user already moved on
         if error:
@@ -657,29 +785,36 @@ class Window(QWidget):
             # described by whatever was still loaded from the last one -
             # frame, segment buttons, window text and all - which reads as a
             # clip that built fine and happens to be wrong.
-            self.player.stop()
-            self.player.setSource(QUrl())
-            self._clear_segments()
-            self.window_lbl.setText("")
+            self._clear_player()
             self.status.setText(error)
             return
         self.status.setText("")
         self.full_btn.setEnabled(True)
-        # Describe what the file actually holds, not what was requested.
-        full = Path(path).name.startswith("full_")
-        info = rv.clip_info(Path(path))
-        starts = [] if full else (info.get("segments") or [])
+        # Describe what the files actually hold, not what was requested.
+        built = Path(path)
+        self._full = built.name.startswith("full_")
+        info = rv.clip_info(built)
+        starts = [] if self._full else (info.get("segments") or [])
+        lengths = (info.get("lengths")
+                   or [float(rv.SEGMENT_SECONDS)] * len(starts))
+        # A sidecar from before the windows were separate files describes one
+        # file, which is what it was.
+        names = info.get("files") or [built.name]
+        self._files = [str(built.with_name(n)) for n in names]
+        self._keyframes = info.get("keyframes") or []
         self._show_segments(starts)
         if starts:
-            label = (f"{len(starts)} x {rv.SEGMENT_SECONDS}s from song "
-                     + ", ".join(self._mmss(x) for x in starts))
-        elif full:
+            label = " · ".join(f"{ln:.0f}s from {self._mmss(s)}"
+                                    for s, ln in zip(starts, lengths))
+        elif self._full:
             label = "full song"
         else:
             label = ""
-        # Say it outright when the footage runs out before the song does.
-        # Fewer windows than usual is the symptom; this is the cause, and
-        # without it a short clip reads as a build that went wrong.
+        # Say it outright when the footage and the song do not end together.
+        # Fewer windows than usual is the symptom of a short video; this is
+        # the cause, and without it a short clip reads as a build that went
+        # wrong. The other direction is the same measurement saying that
+        # nothing is missing.
         song = next((x for x in self.songs if x["song_dir"] == self.current),
                     None)
         reach = info.get("reach_seconds")
@@ -687,14 +822,16 @@ class Window(QWidget):
         if reach is not None and chart and reach < chart - 1.0:
             label += (" · video ends at " + self._mmss(reach)
                       + " of " + self._mmss(chart))
+        elif reach is not None and chart and reach > chart + 1.0:
+            label += f" · video runs {reach - chart:.0f} s past the song"
         self.window_lbl.setText(label)
-        self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.play()
+        self._play_segment(0)
 
     def _loop(self, status) -> None:
-        if status == QMediaPlayer.MediaStatus.EndOfMedia and \
-                not self.player.source().toLocalFile().split("/")[-1] \
-                        .startswith("full_"):
+        # Segments loop: a fifteen-second window gets watched several times
+        # over. The full build does not - it has an end, and restarting a
+        # four-minute file from the top is not what reaching it means.
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and not self._full:
             self.player.setPosition(0)
             self.player.play()
 
@@ -706,9 +843,11 @@ class Window(QWidget):
         s = next((x for x in self.songs if x["song_dir"] == self.current), None)
         if not s or not s.get("video_id"):
             return
-        at = int(s.get("clip_video_s") or 0)
+        # No timestamp: this opens the video, not a moment in it. The moment
+        # it used to name was the first window's, and every button under it
+        # now goes somewhere else.
         QDesktopServices.openUrl(QUrl(
-            "https://www.youtube.com/watch?v=" + s["video_id"] + "&t=" + str(at) + "s"))
+            "https://www.youtube.com/watch?v=" + s["video_id"]))
 
     def _clear_segments(self) -> None:
         while self.seg_row.count():
@@ -719,18 +858,33 @@ class Window(QWidget):
 
     def _show_segments(self, starts: list[float]) -> None:
         self._clear_segments()
-        if len(starts) < 2:
+        if len(self._files) < 2:
             return
-        for i, start in enumerate(starts):
+        for i, start in enumerate(starts[:len(self._files)]):
             b = QPushButton(f"{i + 1}.  {self._mmss(start)}")
             b.setObjectName("chip")
             b.setCheckable(True)
-            b.clicked.connect(
-                lambda _, n=i: self.player.setPosition(
-                    int(n * rv.SEGMENT_SECONDS * 1000)))
+            b.clicked.connect(lambda _, n=i: self._play_segment(n))
             self.seg_btns.append(b)
             self.seg_row.addWidget(b)
         self.seg_row.addStretch(1)
+
+    def _play_segment(self, n: int) -> None:
+        """
+        Load one window.
+
+        A button is a file now, not a position in a joined one. The join is
+        what a short segment used to break, and the button that seeked into an
+        index the concat never wrote restarted the clip at zero instead.
+        """
+        if not (0 <= n < len(self._files)):
+            return
+        self.player.setSource(QUrl.fromLocalFile(self._files[n]))
+        self.player.play()
+        for i, b in enumerate(self.seg_btns):
+            b.blockSignals(True)
+            b.setChecked(i == n)
+            b.blockSignals(False)
 
     def _on_position(self, ms: int) -> None:
         if not self.scrub.isSliderDown():
@@ -738,26 +892,77 @@ class Window(QWidget):
         total = self.player.duration()
         self.time_lbl.setText(
             self._mmss(ms / 1000) + " / " + self._mmss(total / 1000))
-        if self.seg_btns:
-            idx = min(int(ms / (rv.SEGMENT_SECONDS * 1000)),
-                      len(self.seg_btns) - 1)
-            for i, b in enumerate(self.seg_btns):
-                b.setChecked(i == idx)
+
+    def _on_scrub_moved(self, ms: int) -> None:
+        """
+        Follow the drag on a segment; wait for the release on the full build.
+
+        A segment is fifteen seconds of re-encoded h264 and seeks anywhere.
+        The full build's video stream was copied, so its keyframes are as much
+        as ten seconds apart and every seek in a drag decodes forward to the
+        next one - the window locks up for the length of the drag.
+        """
+        if not self._full:
+            self.player.setPosition(ms)
+
+    def _on_scrub_released(self) -> None:
+        ms = self.scrub.value()
+        if self._full:
+            ms = rv.snap_to_keyframe(ms, self._keyframes)
+        self.player.setPosition(ms)
+
+    def _skip(self, delta_ms: int) -> None:
+        """Ten seconds either way, inside the clip."""
+        total = self.player.duration()
+        target = self.player.position() + delta_ms
+        self.player.setPosition(int(max(0, min(target, total))))
 
     def _load_full(self) -> None:
         if self.current is None:
             return
-        self.player.stop()
-        self.status.setText("Building the full song - this takes longer…")
         self.full_btn.setEnabled(False)
-        job = ClipJob(self.db_path, self.work, self.current, full=True)
-        job.signals.done.connect(self._clip_ready)
-        self._job = job
-        self.pool.start(job)
+        self._queue_build(full=True)
 
     def _restart(self) -> None:
         self.player.setPosition(0)
         self.player.play()
+
+    # ---------------------------------------------------------------- events
+    def eventFilter(self, obj, event) -> bool:
+        """
+        A left click on the picture plays or pauses.
+
+        QVideoWidget renders into a QWindow of its own inside a container
+        widget, so the press lands on that window and never reaches any
+        widget's mousePressEvent. The filter goes on the application because
+        that window is where the event has to be caught.
+        """
+        try:
+            if (event.type() == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton
+                    and self._is_video_press(obj, event)):
+                self._toggle()
+                return True
+        except RuntimeError:
+            pass          # something went away underneath us
+        return super().eventFilter(obj, event)
+
+    def _is_video_press(self, obj, event) -> bool:
+        if obj is self.video:
+            return True
+        handle = self.window().windowHandle()
+        if handle is None or not isinstance(obj, QWindow) \
+                or obj.parent() is not handle:
+            return False
+        top_left = self.video.mapToGlobal(QPoint(0, 0))
+        return QRect(top_left, self.video.size()).contains(
+            event.globalPosition().toPoint())
+
+    def closeEvent(self, event) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        super().closeEvent(event)
 
     def _sync_play_button(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState

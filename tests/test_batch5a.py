@@ -58,23 +58,24 @@ def test_windows_are_fifteen_seconds():
 def test_windows_cover_start_middle_and_end():
     # chart 200 s, video long enough, offset -1 s: footage starts at 1 s.
     row = R(offset_ms=-1000.0, chart_seconds=200.0)
-    starts = rv.segment_starts(row, video_seconds=400.0)
-    assert len(starts) == 3
-    first, mid, last = starts
+    windows = rv.segment_windows(row, video_seconds=400.0)
+    assert len(windows) == 3
+    (first, _), (mid, _), (last, last_len) = windows
     assert 1.0 <= first <= 5.0                       # the lead-in, not a chorus
-    assert last + rv.SEGMENT_SECONDS >= 200.0 - 3.0  # the very end of the song
+    assert last + last_len >= 200.0 - 3.0            # the very end of the song
     assert abs(mid - (first + last) / 2) < 2.0       # middle, not 55% of the song
 
 
 def test_last_window_ends_where_the_footage_does():
     # Closing Time: chart 278.3, video 232.5, offset -3355 ms -> footage reaches 235.9.
     row = R(offset_ms=-3355.0, chart_seconds=278.3)
-    starts = rv.segment_starts(row, video_seconds=232.5)
+    windows = rv.segment_windows(row, video_seconds=232.5)
     reach = rv.video_reach(232.5, -3355.0)
-    assert len(starts) == 3
-    assert starts[-1] + rv.SEGMENT_SECONDS <= reach + 0.01
-    assert starts[-1] + rv.SEGMENT_SECONDS >= reach - 3.0
-    for s in starts:
+    assert len(windows) == 3
+    last, last_len = windows[-1]
+    assert last + last_len <= reach + 0.01
+    assert last + last_len >= reach - 3.0
+    for s, _ in windows:
         assert s + row["offset_ms"] / 1000.0 >= 0
 
 

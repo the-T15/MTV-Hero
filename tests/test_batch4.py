@@ -99,15 +99,20 @@ def _probe_durations(path: Path) -> dict:
 def test_short_video_builds_a_consistent_clip(short_song, tmp_path):
     row = R(song_dir=str(short_song), offset_ms=0.0, chart_seconds=60.0,
             source_path=str(short_song / "video.src.mkv"))
-    out = rv.build_clip(row, tmp_path / "work")
+    work = tmp_path / "work"
+    out = rv.build_clip(row, work)
     assert out is not None
-    d = _probe_durations(out)
-    assert abs(d["video"] - d["audio"]) < 0.5, d
-    starts = rv.clip_segments(out)
+    info = rv.clip_info(out)
+    starts, lengths, files = info["segments"], info["lengths"], info["files"]
     assert starts, "sidecar lists the segments that exist"
-    assert abs(d["video"] - len(starts) * rv.SEGMENT_SECONDS) < 1.0, (d, starts)
-    for s in starts:
-        assert s + rv.SEGMENT_SECONDS <= 40.0 + 0.01, "no segment reaches past the video"
+    # One file per window, each consistent with itself and with the length the
+    # sidecar claims for it. The windows are separate files now, so there is
+    # no joined duration to check and no container for a scrap to break.
+    for s, ln, name in zip(starts, lengths, files):
+        d = _probe_durations(work / name)
+        assert abs(d["video"] - d["audio"]) < 0.5, (name, d)
+        assert abs(d["video"] - ln) < 1.0, (name, d, ln)
+        assert s + ln <= 40.0 + 0.01, "no segment reaches past the video"
 
 
 def test_sidecar_records_video_reach(short_song, tmp_path):
