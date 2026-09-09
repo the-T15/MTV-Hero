@@ -30,9 +30,10 @@ from PySide6.QtGui import (QDesktopServices, QFont, QKeySequence,
                            QShortcut)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox,
-                               QPushButton, QSizePolicy, QSlider, QSplitter,
+from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMessageBox, QPushButton,
+                               QSizePolicy, QSlider, QSplitter,
                                QVBoxLayout, QWidget)
 from collections import Counter
 
@@ -137,7 +138,7 @@ class Window(QWidget):
         self.all_songs: list[dict] = []
         self.songs: list[dict] = []
         self.active: set[str] = set()
-        self.mode = "watch"
+        self.mode = "clean"
         self.sort = "doubt"
         self.chips: dict[str, QPushButton] = {}
         self.current: str | None = None
@@ -153,62 +154,83 @@ class Window(QWidget):
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._select)
 
-        # Filter chips. Selecting none shows everything; selecting several
-        # shows anything carrying at least one of them, so "third-party" plus
-        # "weak match" answers "what might simply be the wrong video".
-        # Two lists, not one. A still image needs a keep-or-replace decision,
-        # not twenty seconds of watching, and mixing them in buries the songs
-        # that do need an eye on them.
-        self.tab_watch = QPushButton("To watch")
-        self.tab_still = QPushButton("Still images")
-        self.tab_later = QPushButton("Saved for later")
-        self.tab_existing = QPushButton("Has a video")
-        for btn, mode in ((self.tab_watch, "watch"), (self.tab_still, "still"),
-                          (self.tab_existing, "existing"),
-                          (self.tab_later, "later")):
-            btn.setObjectName("tab")
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _, m=mode: self._set_mode(m))
-        self.tab_watch.setChecked(True)
-        tabs = QHBoxLayout()
-        tabs.setContentsMargins(14, 0, 14, 8)
-        tabs.setSpacing(6)
-        tabs.addWidget(self.tab_watch)
-        tabs.addWidget(self.tab_still)
-        tabs.addWidget(self.tab_existing)
-        tabs.addWidget(self.tab_later)
-        tabs.addStretch(1)
+        # Nothing found one song by name. With 1,500 of them the only way
+        # back to the one you were looking at a minute ago was to scroll for
+        # it, and the video's own title is as likely to be what you remember
+        # as the song's.
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Find a song, video or channel")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda _: self._on_search())
+        search_holder = QWidget()
+        sh = QHBoxLayout(search_holder)
+        sh.setContentsMargins(14, 0, 14, 8)
+        sh.setSpacing(0)
+        sh.addWidget(self.search)
 
-        # Sort order. Weakest-match-first is the useful one for working
-        # through hand-picked videos, where a low score means a different
-        # recording and the clip has to be judged by eye.
+        # One song in exactly one tile, assigned by rv.bucket. The tile is the
+        # filter. The old tabs overlapped, so a still image on a stranger's
+        # channel was counted twice and listed once, in whichever tab you
+        # happened to have open. Two columns because eight of these do not fit
+        # across the pane, and the pane width is right as it is.
+        self.tiles: dict[str, QPushButton] = {}
+        grid = QGridLayout()
+        grid.setContentsMargins(14, 0, 14, 8)
+        grid.setSpacing(6)
+        for i, tile in enumerate(rv.TILES):
+            b = QPushButton(rv.TILE_LABELS[tile])
+            b.setObjectName("tab")
+            b.setCheckable(True)
+            b.setChecked(tile == self.mode)
+            b.clicked.connect(lambda _, m=tile: self._set_mode(m))
+            self.tiles[tile] = b
+            grid.addWidget(b, i // 2, i % 2)
+        tile_holder = QWidget()
+        tile_holder.setLayout(grid)
+
+        # One choice with three settings. Three separate buttons read as three
+        # unrelated controls, and two of them ranked on the match score, which
+        # says nothing about where in the list a song should be.
         self.sorts: dict[str, QPushButton] = {}
+        sort_bar = QHBoxLayout()
+        sort_bar.setContentsMargins(14, 0, 14, 8)
+        sort_bar.setSpacing(6)
+        sort_lbl = QLabel("Sort")
+        sort_lbl.setObjectName("hint")
+        sort_bar.addWidget(sort_lbl)
         for key, label in (("doubt", "Most doubtful"),
-                           ("match_asc", "Match \u2191"),
-                           ("match_desc", "Match \u2193")):
+                           ("artist", "Artist A-Z"),
+                           ("title", "Title A-Z")):
             b = QPushButton(label)
             b.setObjectName("chip")
             b.setCheckable(True)
-            b.setChecked(key == "doubt")
+            b.setChecked(key == self.sort)
             b.clicked.connect(lambda _, k=key: self._set_sort(k))
             self.sorts[key] = b
-            tabs.addWidget(b)
-        tab_holder = QWidget()
-        tab_holder.setLayout(tabs)
+            sort_bar.addWidget(b)
+        sort_bar.addStretch(1)
+        sort_holder = QWidget()
+        sort_holder.setLayout(sort_bar)
 
+        # Chips filter within Unsure and nowhere else. Under any other tile
+        # the tile itself is the filter, and a second row of filters under it
+        # is two controls doing one job.
         self.chip_bar = QHBoxLayout()
         self.chip_bar.setContentsMargins(14, 0, 14, 10)
         self.chip_bar.setSpacing(6)
-        chip_holder = QWidget()
-        chip_holder.setLayout(self.chip_bar)
+        self.chip_holder = QWidget()
+        self.chip_holder.setLayout(self.chip_bar)
+        self.chip_holder.setVisible(self.mode == "unsure")
 
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(0)
         lv.addWidget(self.count)
-        lv.addWidget(tab_holder)
-        lv.addWidget(chip_holder)
+        lv.addWidget(search_holder)
+        lv.addWidget(tile_holder)
+        lv.addWidget(sort_holder)
+        lv.addWidget(self.chip_holder)
         lv.addWidget(self.list, 1)
 
         # --- right: player and detail -------------------------------------
@@ -278,6 +300,31 @@ class Window(QWidget):
         self.seg_row.setSpacing(6)
         self.seg_btns: list[QPushButton] = []
 
+        # Nudging the offset. Small steps for a beat that lands just late,
+        # a box for a figure you measured. Either way the song is locked the
+        # way `offset` locks it, and the clip is rebuilt rather than adjusted:
+        # the alignment is half of the clip's cache key already, so a new
+        # offset is a new file and there is nothing stale to invalidate.
+        self.off_row = QHBoxLayout()
+        self.off_row.setSpacing(6)
+        nudge_lbl = QLabel("Offset")
+        nudge_lbl.setObjectName("hint")
+        self.off_row.addWidget(nudge_lbl)
+        for delta in (-100, -10, 10, 100):
+            b = QPushButton(f"{delta:+d} ms")
+            b.setObjectName("chip")
+            b.clicked.connect(lambda _, d=delta: self._nudge(d))
+            self.off_row.addWidget(b)
+        self.offset_box = QLineEdit()
+        self.offset_box.setPlaceholderText("ms")
+        self.offset_box.setFixedWidth(90)
+        self.off_row.addWidget(self.offset_box)
+        self.set_btn = QPushButton("Set")
+        self.set_btn.setObjectName("chip")
+        self.set_btn.clicked.connect(self._apply_offset)
+        self.off_row.addWidget(self.set_btn)
+        self.off_row.addStretch(1)
+
         scrub_row = QHBoxLayout()
         scrub_row.setSpacing(8)
         scrub_row.addWidget(self.scrub, 1)
@@ -319,6 +366,18 @@ class Window(QWidget):
         self.keep_btn = QPushButton("Looks right")
         self.keep_btn.setObjectName("keep")
         self.keep_btn.clicked.connect(lambda: self._act("keep"))
+
+        # Approval used to be a one-way door: the only way back out of it was
+        # the command line.
+        self.unapprove_btn = QPushButton("Un-approve")
+        self.unapprove_btn.clicked.connect(lambda: self._act("unapprove"))
+
+        # Only ever on Nothing unusual, where the point of the tile is that
+        # nothing in it asked for a song-by-song decision.
+        self.approve_all_btn = QPushButton("Approve all of these")
+        self.approve_all_btn.setObjectName("keep")
+        self.approve_all_btn.clicked.connect(self._approve_all)
+        self.approve_all_btn.setVisible(self.mode == "clean")
         self.url = QLineEdit()
         self.url.setPlaceholderText("Paste a better YouTube link")
         self.rep_btn = QPushButton("Use this instead")
@@ -326,6 +385,8 @@ class Window(QWidget):
 
         acts = QHBoxLayout()
         acts.addWidget(self.keep_btn)
+        acts.addWidget(self.unapprove_btn)
+        acts.addWidget(self.approve_all_btn)
         acts.addWidget(self.url, 1)
         acts.addWidget(self.rep_btn)
         acts.addWidget(self.later_btn)
@@ -343,6 +404,7 @@ class Window(QWidget):
         rv_.addWidget(self.by)
         rv_.addWidget(self.video, 1)          # takes the spare vertical space
         rv_.addLayout(self.seg_row)
+        rv_.addLayout(self.off_row)
         rv_.addLayout(scrub_row)
         rv_.addLayout(transport)
         rv_.addWidget(self.status)
@@ -367,8 +429,10 @@ class Window(QWidget):
     # ------------------------------------------------------------------ data
     def _rebuild_chips(self) -> None:
         pool = self._pool(self.mode)
-        skip = {"still"} if self.mode in ("watch", "still") else set()
-        counts = Counter(t for s in pool for t in s["tags"] if t not in skip)
+        # Only the doubt tags, because chips only ever appear under Unsure and
+        # Unsure is exactly the songs a doubt tag put there.
+        counts = Counter(t for s in pool for t in s["tags"]
+                         if t in rv.DOUBT_TAGS)
         wanted = [t for t in rv.TAG_ORDER if counts[t]]
         if set(wanted) != set(self.chips):
             while self.chip_bar.count():
@@ -395,47 +459,27 @@ class Window(QWidget):
 
     def _pool(self, mode: str) -> list[dict]:
         """
-        The songs a tab holds.
+        The songs one tile holds.
 
-        One definition, used for both the list and the number on the tab. Two
-        of them disagreed: the count said "to watch" of songs the list put in
-        'Has a video', so the tab promised work that was not there.
+        One definition, used for the list and for the number on the tile, and
+        `rv.bucket` guarantees the eight of them are a partition: every song
+        is in one, no song is in two. The old tabs were neither - the count
+        said "to watch" of songs the list put under 'Has a video', and a still
+        image on a stranger's channel was in two counts at once.
         """
-        if mode == "later":
-            return [s for s in self.all_songs if s["review"] == "later"]
-        if mode == "existing":
-            # Songs that already had a video before this pipeline encoded
-            # anything. Encoding replaces it, so these are worth comparing
-            # rather than overwriting unseen.
-            return [s for s in self.all_songs
-                    if s.get("existing_video") and s["review"] != "later"]
-        want_still = mode == "still"
-        return [s for s in self.all_songs
-                if bool(s["static"]) == want_still
-                and s["review"] != "later"
-                and not s.get("existing_video")]
-
-    def _todo(self, mode: str) -> int:
-        """
-        How many songs in a tab are still waiting on a decision.
-
-        The list keeps showing songs you have kept - at the bottom, so the
-        order is stable and you can go back to one. The number on the tab is
-        not for that: it answers "how much is left", and counting work already
-        done meant every tab stayed the same size however long you worked.
-
-        'later' is not a decision, it is a deferral, so those still count.
-        """
-        return sum(1 for s in self._pool(mode) if s["review"] != "keep")
+        return [s for s in self.all_songs if rv.bucket(s) == mode]
 
     def _set_mode(self, mode: str) -> None:
         self.mode = mode
-        self.tab_watch.setChecked(mode == "watch")
-        self.tab_still.setChecked(mode == "still")
-        self.tab_later.setChecked(mode == "later")
-        self.tab_existing.setChecked(mode == "existing")
+        for tile, btn in self.tiles.items():
+            btn.setChecked(tile == mode)
         self.active.clear()
         self.player.stop()
+        self.refresh()
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _on_search(self) -> None:
         self.refresh()
         if self.list.count():
             self.list.setCurrentRow(0)
@@ -468,19 +512,32 @@ class Window(QWidget):
         finally:
             db.close()
         pool = self._pool(self.mode)
-        self.songs = ([s for s in pool if self.active & set(s["tags"])]
-                      if self.active else pool)
-        # Reviewed songs stay at the bottom whatever the order.
-        if self.sort == "match_asc":
-            self.songs.sort(key=lambda s: (s["review"] is not None,
-                                           s["fp_score"] or 0, s["artist"]))
-        elif self.sort == "match_desc":
-            self.songs.sort(key=lambda s: (s["review"] is not None,
-                                           -(s["fp_score"] or 0), s["artist"]))
-        self.tab_watch.setText(f"To watch  {self._todo('watch')}")
-        self.tab_still.setText(f"Still images  {self._todo('still')}")
-        self.tab_later.setText(f"Saved for later  {self._todo('later')}")
-        self.tab_existing.setText(f"Has a video  {self._todo('existing')}")
+        if self.active:
+            pool = [s for s in pool if self.active & set(s["tags"])]
+        # The song you are looking for by name, whichever of its four names
+        # you happen to remember.
+        needle = self.search.text().strip().lower()
+        if needle:
+            pool = [s for s in pool
+                    if needle in " ".join((s["artist"], s["title"],
+                                           s["video"], s["channel"])).lower()]
+        self.songs = pool
+        # 'doubt' is the order rv.queue already returns.
+        if self.sort == "artist":
+            self.songs.sort(key=lambda s: (s["artist"].lower(),
+                                           s["title"].lower()))
+        elif self.sort == "title":
+            self.songs.sort(key=lambda s: (s["title"].lower(),
+                                           s["artist"].lower()))
+
+        # The number on a tile is the size of the tile, not of the filtered
+        # list: it is there to say where the work is, and a search that hides
+        # eight of nine songs has not finished any of them.
+        held = Counter(rv.bucket(s) for s in self.all_songs)
+        for tile, btn in self.tiles.items():
+            btn.setText(f"{rv.TILE_LABELS[tile]}  {held[tile]}")
+        self.chip_holder.setVisible(self.mode == "unsure")
+        self.approve_all_btn.setVisible(self.mode == "clean")
         self._rebuild_chips()
 
         self.list.blockSignals(True)
@@ -501,14 +558,15 @@ class Window(QWidget):
             self.list.addItem(item)
         self.list.blockSignals(False)
 
-        todo = sum(1 for s in self.songs if not s["review"])
-        if self.active:
-            self.count.setText(
-                f"{todo} left of {len(self.songs)} shown "
-                f"({len(self.all_songs)} total)")
+        shown = len(self.songs)
+        held = len(self._pool(self.mode))
+        label = rv.TILE_LABELS[self.mode]
+        if shown == held:
+            self.count.setText(f"{label} — {held} of "
+                               f"{len(self.all_songs)} songs")
         else:
-            self.count.setText(f"{todo} left of {len(self.songs)}, "
-                               f"most doubtful first")
+            self.count.setText(f"{label} — {shown} of {held} shown, "
+                               f"{len(self.all_songs)} songs in all")
         if keep_row is not None and 0 <= keep_row < self.list.count():
             self.list.setCurrentRow(keep_row)
 
@@ -715,6 +773,8 @@ class Window(QWidget):
         """
         if self.url.hasFocus() and self.url.text().strip():
             self._act("replace")
+        elif self.offset_box.hasFocus() and self.offset_box.text().strip():
+            self._apply_offset()
         else:
             self._act("keep")
 
@@ -725,6 +785,93 @@ class Window(QWidget):
             self.player.play()
 
     # --------------------------------------------------------------- actions
+    def _nudge(self, delta_ms: int) -> None:
+        """Move this song's offset by a step and lock it there."""
+        s = next((x for x in self.songs if x["song_dir"] == self.current), None)
+        if s is None:
+            return
+        self._store_offset((s["offset_ms"] or 0.0) + delta_ms)
+
+    def _apply_offset(self) -> None:
+        """Set this song's offset to the figure in the box and lock it."""
+        text = self.offset_box.text().strip()
+        if self.current is None or not text:
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            QMessageBox.warning(
+                self, "Not a number",
+                "Type the offset in milliseconds, e.g. -2500.")
+            return
+        self._store_offset(value)
+
+    def _store_offset(self, offset_ms: float) -> None:
+        """
+        Write a hand-set offset the way `yargvid offset` writes one.
+
+        The same lock: MANUAL in the note, so `sync --recheck` computes over
+        it no more than it does over a hand-picked video, spread zero because
+        this offset was not measured across windows, and the review cleared
+        because the clip you approved was built at the old one.
+        """
+        if self.current is None:
+            return
+        target = self.current
+        db = Database(self.db_path)
+        try:
+            db.update(Path(target), offset_ms=float(offset_ms), spread_ms=0.0,
+                      sync_status="ok",
+                      sync_note="MANUAL: offset set by hand", review=None)
+        finally:
+            db.close()
+        self.player.stop()
+        self.offset_box.clear()
+        self.refresh()
+        # Reselect the song, not the row. The row number usually does not
+        # move, and setCurrentRow to the row already current emits nothing -
+        # the clip would then still be the one built at the old offset, which
+        # is the one thing this must not leave on screen.
+        idx = next((i for i, s in enumerate(self.songs)
+                    if s["song_dir"] == target), None)
+        if idx is None:
+            return
+        self.list.blockSignals(True)
+        self.list.setCurrentRow(idx)
+        self.list.blockSignals(False)
+        self._select(idx)
+
+    def _approve_all(self) -> None:
+        """
+        Approve a whole tile at once.
+
+        Nothing unusual only. That tile exists to hold the songs nothing was
+        measured against; every other tile exists because something was, and
+        a batch decision there would be a decision not to look.
+        """
+        if self.mode != "clean":
+            return
+        pool = self._pool("clean")
+        if not pool:
+            return
+        if QMessageBox.question(
+            self, "Approve all of these?",
+            f"Mark all {len(pool)} songs in "
+            f"“{rv.TILE_LABELS['clean']}” as approved? "
+            "Nothing was flagged on any of them; they move to Approved.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        db = Database(self.db_path)
+        try:
+            for s in pool:
+                db.update(Path(s["song_dir"]), review="keep")
+        finally:
+            db.close()
+        self.player.stop()
+        self.refresh()
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
     def _act(self, action: str) -> None:
         if self.current is None:
             return
@@ -733,6 +880,8 @@ class Window(QWidget):
         try:
             if action == "keep":
                 db.update(Path(self.current), review="keep")
+            elif action == "unapprove":
+                db.update(Path(self.current), review=None)
             elif action == "later":
                 db.update(Path(self.current), review="later")
             elif action == "drop":

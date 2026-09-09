@@ -171,6 +171,7 @@ def window(qapp, tmp_path):
 def test_failed_build_clears_the_player(window, qapp):
     from PySide6.QtCore import QUrl
     w = window
+    w._set_mode("third")
     w.list.setCurrentRow(0)
     qapp.processEvents()
     w.player.setSource(QUrl.fromLocalFile("C:/nowhere/previous.mp4"))
@@ -202,6 +203,7 @@ def test_chips_are_single_select(window, qapp):
 
 def test_clip_label_says_where_the_video_ends(window, qapp, tmp_path):
     w = window
+    w._set_mode("third")
     w.list.setCurrentRow(0)
     qapp.processEvents()
     clip = tmp_path / "work" / "clip_00000000_00000000.mp4"

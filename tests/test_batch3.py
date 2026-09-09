@@ -252,35 +252,3 @@ def test_readme_says_limit_goes_before_the_subcommand():
     assert "Every command takes" not in text        # the sentence that misled
     assert "yargvid --limit" in text                # the flag shown in position
 
-
-# ------------------------------------------------------------- Qt ------------
-
-PySide6 = pytest.importorskip("PySide6")
-
-
-def test_tab_counts_show_what_is_left_to_do(tmp_path):
-    from PySide6.QtWidgets import QApplication
-    from PySide6.QtTest import QTest
-    from yargvid.app import Window
-    app = QApplication.instance() or QApplication([])
-    dbp = tmp_path / "app.sqlite"
-    d = Database(dbp)
-    for name, review in (("todo", None), ("done", "keep")):
-        p = tmp_path / name
-        p.mkdir()
-        (p / "video.src.mkv").write_bytes(b"x")
-        (p / "guitar.ogg").write_bytes(b"")
-        song(d, p, match_status="ok", match_note="T [U]", download_status="ok",
-             source_path=str(p / "video.src.mkv"), sync_status="ok",
-             offset_ms=0.0, spread_ms=1.0, fp_score=500.0, motion=0.5,
-             review=review)
-    d.close()
-    w = Window(dbp, tmp_path / "work")
-    w.show()
-    app.processEvents()
-    try:
-        assert w.list.count() == 2                  # kept song still listed
-        assert int(w.tab_watch.text().split()[-1]) == 1   # but not counted as work
-    finally:
-        w.close()
-        QTest.qWait(50)

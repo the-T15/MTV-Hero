@@ -48,7 +48,7 @@ FULL_HEIGHT = 360
 # a person actually reads. A bare list of prose was unfilterable and only the
 # first line ever showed, which said nothing about the shape of the queue.
 TAG_LABELS = {
-    "replaced":  "replaced",
+    "replaced":  "user override",
     "weak":      "weak match",
     "channel":   "third-party",
     "audio":     "audio only",
@@ -63,6 +63,59 @@ TAG_LABELS = {
     "clean":     "nothing unusual",
 }
 TAG_ORDER = list(TAG_LABELS)
+
+# The tiles the worklist is divided into, left to right, and the one line
+# each of them is allowed to say for itself.
+TILES = ("clean", "unsure", "third", "still", "override", "existing",
+         "approved", "later")
+TILE_LABELS = {
+    "clean":    "Nothing unusual",
+    "unsure":   "Unsure",
+    "third":    "Third party",
+    "still":    "Still image",
+    "override": "User override",
+    "existing": "Video already in folder",
+    "approved": "Approved",
+    "later":    "Save for later",
+}
+
+# The tags that mean "this might be the wrong video or the wrong time", as
+# opposed to the ones that describe what the video is. Together they are the
+# Unsure tile, and inside it they are the filter chips.
+DOUBT_TAGS = frozenset({"weak", "unverified", "unsteady", "shift", "drift",
+                        "audio", "short", "flat"})
+
+
+def bucket(song) -> str:
+    """
+    The one tile a song belongs to.
+
+    First match wins, so no song is in two places and no count double-reports
+    it. The old tabs were not a partition: a still image on a third-party
+    channel was in two counts and one list, and which list depended on the tab
+    you happened to be looking at.
+
+    Decisions outrank measurements. Approved, saved and overridden are things
+    you did, and they are the reason you would go looking for the song again;
+    everything below them is something the pipeline measured.
+    """
+    review = song.get("review")
+    if review == "keep":
+        return "approved"
+    if review == "later":
+        return "later"
+    tags = set(song.get("tags") or ())
+    if "replaced" in tags:
+        return "override"
+    if song.get("existing_video"):
+        return "existing"
+    if song.get("static"):
+        return "still"
+    if "channel" in tags:
+        return "third"
+    if tags & DOUBT_TAGS:
+        return "unsure"
+    return "clean"
 
 
 def fmt_mmss(seconds: float) -> str:

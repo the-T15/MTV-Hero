@@ -260,19 +260,6 @@ def window(qapp, tmp_path):
     QTest.qWait(50)
 
 
-def _count(label: str) -> int:
-    return int(label.split()[-1])
-
-
-def test_D3_tab_counts_match_the_list(window, qapp):
-    w, _ = window
-    for mode, tab in (("watch", w.tab_watch), ("still", w.tab_still),
-                      ("existing", w.tab_existing)):
-        w._set_mode(mode)
-        qapp.processEvents()
-        assert _count(tab.text()) == w.list.count(), mode
-
-
 def test_D2_pre_existing_video_notice_is_visible(window, qapp):
     w, _ = window
     w._set_mode("existing")
@@ -285,7 +272,7 @@ def test_D2_pre_existing_video_notice_is_visible(window, qapp):
 
 def test_D4_facts_show_unverified(window, qapp):
     w, _ = window
-    w._set_mode("watch")
+    w._set_mode("unsure")
     qapp.processEvents()
     for i, s in enumerate(w.songs):
         if s["title"] == "unv":
@@ -326,6 +313,7 @@ def test_D5_app_drop_uses_drop_song(window, qapp, monkeypatch):
     w, dbp = window
     monkeypatch.setattr(appmod.QMessageBox, "question",
                         lambda *a, **k: QMessageBox.StandardButton.Yes)
+    w._set_mode("third")
     w.list.setCurrentRow(0)
     qapp.processEvents()
     target = w.current
