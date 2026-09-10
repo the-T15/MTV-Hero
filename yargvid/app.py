@@ -1142,7 +1142,19 @@ class Window(QWidget):
         idx = next((i for i, s in enumerate(self.songs)
                     if s["song_dir"] == target), None)
         if idx is None:
-            return
+            # Save clears the review, so a song saved from Approved or Save
+            # for later has just left the tile on screen. Stopping here left
+            # nothing selected, an empty player and the old song's text over
+            # it - the song looked lost rather than moved. Follow it.
+            song = next((s for s in self.all_songs
+                         if s["song_dir"] == target), None)
+            if song is None:
+                return
+            self._set_mode(rv.bucket(song))
+            idx = next((i for i, s in enumerate(self.songs)
+                        if s["song_dir"] == target), None)
+            if idx is None:
+                return          # a search filter is hiding it in its new tile
         self.list.blockSignals(True)
         self.list.setCurrentRow(idx)
         self.list.blockSignals(False)

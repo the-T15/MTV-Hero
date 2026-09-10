@@ -445,3 +445,36 @@ def test_low_motion_song_shows_under_unsure_with_a_chip(window, qapp):
     w._set_mode("still")
     qapp.processEvents()
     assert w.list.count() == 0
+
+
+# ------------------------------------------------- follow-up: Save that ------
+# ------------------------------------------------- leaves the tile ----------
+
+@pytest.mark.parametrize("mode", ["approved", "later"])
+def test_save_follows_the_song_to_its_new_tile(window, qapp, mode):
+    """
+    Save clears the review, so a song saved from Approved or Save for later
+    leaves that tile. The app used to stop there: nothing selected, no clip,
+    the old song's text still on screen.
+    """
+    w, dbp = window
+    target = _pick(w, qapp, mode)
+    was = w.list.count()
+    w._nudge(1)
+    qapp.processEvents()
+    w.status.setText("")
+    w._save_offset()
+    qapp.processEvents()
+    song = next(s for s in w.all_songs if s["song_dir"] == target)
+    assert song["review"] is None
+    assert w.mode == rv.bucket(song) == "clean"
+    assert w.tiles["clean"].isChecked()
+    assert not w.tiles[mode].isChecked()
+    assert w.current == target
+    assert w.songs[w.list.currentRow()]["song_dir"] == target
+    assert w.draft_offset is None
+    assert "-999" in w.facts.text()
+    assert "building" in w.status.text().lower()
+    w._set_mode(mode)
+    qapp.processEvents()
+    assert w.list.count() == was - 1
