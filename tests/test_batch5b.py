@@ -193,36 +193,6 @@ def test_search_finds_a_song_by_any_of_its_names(window, qapp):
     assert len(_titles(w)) == 2
 
 
-def test_nudging_the_offset_locks_it(window, qapp):
-    w, dbp = window
-    w._set_mode("clean")
-    w.list.setCurrentRow(0)
-    qapp.processEvents()
-    before = _row(dbp, "clean")["offset_ms"]
-    target = w.current
-    w._nudge(100)
-    qapp.processEvents()
-    r = _row(dbp, Path(target).name)
-    assert r["offset_ms"] == pytest.approx(before + 100)
-    assert (r["sync_note"] or "").startswith("MANUAL")
-    assert r["review"] is None
-    assert "building" in w.status.text().lower()      # clip rebuilt in place
-
-
-def test_typing_an_offset_sets_it(window, qapp):
-    w, dbp = window
-    w._set_mode("clean")
-    w.list.setCurrentRow(0)
-    qapp.processEvents()
-    target = w.current
-    w.offset_box.setText("-2500")
-    w._apply_offset()
-    qapp.processEvents()
-    r = _row(dbp, Path(target).name)
-    assert r["offset_ms"] == -2500.0
-    assert (r["sync_note"] or "").startswith("MANUAL")
-
-
 def test_unapprove_is_possible(window, qapp):
     w, dbp = window
     w._set_mode("approved")

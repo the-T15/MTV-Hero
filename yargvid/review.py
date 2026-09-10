@@ -65,6 +65,7 @@ TAG_LABELS = {
     "drift":     "speed drift",
     "short":     "video ends early",
     "still":     "still image",
+    "low_motion": "low motion",
     "existing":  "has a video",
     "clean":     "nothing unusual",
 }
@@ -89,7 +90,13 @@ TILE_LABELS = {
 # opposed to the ones that describe what the video is. Together they are the
 # Unsure tile, and inside it they are the filter chips.
 DOUBT_TAGS = frozenset({"weak", "unverified", "unsteady", "shift", "drift",
-                        "audio", "short", "flat"})
+                        "audio", "short", "flat", "low_motion"})
+
+# The top of the band that is moving but barely: a slideshow, a lyric card
+# with a drifting background, a single locked-off camera. A guess until the
+# motion values of the approved set say where real footage actually sits -
+# take the bound from those before trusting this number.
+LOW_MOTION_MAX = 0.30
 
 
 def bucket(song) -> str:
@@ -255,6 +262,13 @@ def assess(row) -> Risk:
     if motion is not None and enc.is_static(motion):
         pts += 0.5
         why.append(("still", "still image, not footage"))
+    elif motion is not None and enc.STATIC_THRESHOLD <= motion < LOW_MOTION_MAX:
+        # A tag, not a verdict. `is_static` already excludes the negative
+        # sentinel, so this band is only ever a measurement that came back.
+        pts += 0.5
+        why.append(("low_motion",
+                    f"little motion ({motion:.2f}) - may be a slideshow or a "
+                    "lyric video"))
 
     # Not doubt about the match - a note about what is at stake. It rides in
     # the reasons because the status line it used to own is overwritten by the
@@ -300,6 +314,7 @@ def queue(db: Database) -> list[dict]:
             "existing_video": r["existing_video"],
             "static": r["motion"] is not None and enc.is_static(r["motion"]),
             "review": r["review"],
+            "updated_at": r["updated_at"],
             "chart_seconds": r["chart_seconds"],
             "video_seconds": r["video_seconds"],
             "reach_seconds": (video_reach(r["video_seconds"],

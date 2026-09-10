@@ -49,6 +49,11 @@ BUILD_DELAY_MS = 300
 # How far the skip buttons move.
 SKIP_MS = 10000
 
+# The steps the offset buttons move by, left to right. Four sizes cover a
+# frame, a beat and a section, which is everything the typed box was ever
+# used for.
+OFFSET_STEPS = (-100, -10, -5, -1, 1, 5, 10, 100)
+
 BASE, PANEL, LINE = "#12161c", "#171d25", "#2a323d"
 INK, DIM = "#d9dfe7", "#79848f"
 SIGNAL, CLEAR = "#e8a33d", "#6fbf8f"
@@ -93,10 +98,15 @@ class ClipJob(QRunnable):
     """Build one proof clip off the UI thread."""
 
     def __init__(self, db_path: Path, work: Path, song_dir: str,
-                 full: bool = False, token: int = 0):
+                 full: bool = False, token: int = 0,
+                 offset_ms: float | None = None):
         super().__init__()
         self.db_path, self.work, self.song_dir = db_path, work, song_dir
         self.full = full
+        # A draft offset to build at, in place of the stored one. Nothing is
+        # written: the clip's name carries the offset already, so a draft is
+        # just another cache entry beside the saved one.
+        self.offset_ms = offset_ms
         # The serial of the build this job is. Checking the song alone was
         # not enough: nudging the offset re-selects the same song, so the
         # build at the old offset came back matching `current` and landed on
@@ -118,6 +128,9 @@ class ClipJob(QRunnable):
             ).fetchone()
             if row is None:
                 return self._emit("", "Song not found.")
+            if self.offset_ms is not None:
+                row = dict(row)
+                row["offset_ms"] = float(self.offset_ms)
             song_dir = Path(row["song_dir"])
             # Order matters: a folder that no longer exists explains every
             # other symptom, so check it before blaming the encode step for
@@ -206,7 +219,12 @@ class Window(QWidget):
         self.songs: list[dict] = []
         self.active: set[str] = set()
         self.mode = "clean"
-        self.sort = "doubt"
+        # None is queue order: clicking the active sort clears it rather than
+        # leaving you with no way back to the order the queue arrived in.
+        self.sort: str | None = "artist"
+        # An offset being tried out. It is not this song's offset until Save
+        # says so, so it lives here and not in the row.
+        self.draft_offset: float | None = None
         self.chips: dict[str, QPushButton] = {}
         self.current: str | None = None
         # What is on screen, as opposed to what was asked for.
@@ -271,9 +289,10 @@ class Window(QWidget):
         sort_lbl = QLabel("Sort")
         sort_lbl.setObjectName("hint")
         sort_bar.addWidget(sort_lbl)
-        for key, label in (("doubt", "Most doubtful"),
-                           ("artist", "Artist A-Z"),
-                           ("title", "Title A-Z")):
+        for key, label in (("artist", "Artist A-Z"),
+                           ("title", "Title A-Z"),
+                           ("doubt", "Doubt ↓"),
+                           ("doubt_asc", "Doubt ↑")):
             b = QPushButton(label)
             b.setObjectName("chip")
             b.setCheckable(True)
@@ -309,9 +328,15 @@ class Window(QWidget):
         # --- right: player and detail -------------------------------------
         self.head = QLabel("Pick a song on the left")
         self.head.setObjectName("head")
-        self.by = QLabel("The most doubtful ones are at the top.")
+        self.by = QLabel("Sorted by artist, A to Z.")
         self.by.setObjectName("by")
         self.by.setWordWrap(True)
+        # The song title, the video title and the figures are the strings you
+        # paste into a search when you go looking for the video by hand. A
+        # label you cannot select is a string you have to retype.
+        for lbl in (self.head, self.by):
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self.video = QVideoWidget()
         self.video.setMinimumHeight(460)
@@ -382,29 +407,40 @@ class Window(QWidget):
         self.seg_row.setSpacing(6)
         self.seg_btns: list[QPushButton] = []
 
-        # Nudging the offset. Small steps for a beat that lands just late,
-        # a box for a figure you measured. Either way the song is locked the
-        # way `offset` locks it, and the clip is rebuilt rather than adjusted:
-        # the alignment is half of the clip's cache key already, so a new
-        # offset is a new file and there is nothing stale to invalidate.
+        # Nudging the offset. A step is a draft: it rebuilds the clip and
+        # writes nothing, so trying a value costs nothing and leaving the song
+        # is the same as not having answered. Save locks the song the way
+        # `offset` locks it; Undo goes back to the stored value. The clip is
+        # rebuilt rather than adjusted because the alignment is half of the
+        # clip's cache key already, so a draft is a new file and there is
+        # nothing stale to invalidate.
         self.off_row = QHBoxLayout()
         self.off_row.setSpacing(6)
         nudge_lbl = QLabel("Offset")
         nudge_lbl.setObjectName("hint")
         self.off_row.addWidget(nudge_lbl)
-        for delta in (-100, -10, 10, 100):
-            b = QPushButton(f"{delta:+d} ms")
+        for delta in OFFSET_STEPS:
+            b = QPushButton(f"{delta:+d}")
             b.setObjectName("chip")
+            b.setToolTip(f"Try the offset {abs(delta)} ms "
+                         + ("later" if delta > 0 else "earlier")
+                         + ". Nothing is written until you press Save.")
             b.clicked.connect(lambda _, d=delta: self._nudge(d))
             self.off_row.addWidget(b)
-        self.offset_box = QLineEdit()
-        self.offset_box.setPlaceholderText("ms")
-        self.offset_box.setFixedWidth(90)
-        self.off_row.addWidget(self.offset_box)
-        self.set_btn = QPushButton("Set")
-        self.set_btn.setObjectName("chip")
-        self.set_btn.clicked.connect(self._apply_offset)
-        self.off_row.addWidget(self.set_btn)
+        self.save_offset_btn = QPushButton("Save")
+        self.save_offset_btn.setObjectName("chip")
+        self.save_offset_btn.setToolTip(
+            "Lock this song to the offset on screen.")
+        self.save_offset_btn.clicked.connect(self._save_offset)
+        self.save_offset_btn.setEnabled(False)
+        self.off_row.addWidget(self.save_offset_btn)
+        self.undo_offset_btn = QPushButton("Undo")
+        self.undo_offset_btn.setObjectName("chip")
+        self.undo_offset_btn.setToolTip(
+            "Go back to the offset this song is stored with.")
+        self.undo_offset_btn.clicked.connect(self._undo_offset)
+        self.undo_offset_btn.setEnabled(False)
+        self.off_row.addWidget(self.undo_offset_btn)
         self.off_row.addStretch(1)
 
         scrub_row = QHBoxLayout()
@@ -420,6 +456,8 @@ class Window(QWidget):
         mono.setStyleHint(QFont.StyleHint.Monospace)
         mono.setPointSize(12)
         self.facts = QLabel("")
+        self.facts.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
         self.facts.setFont(mono)
         self.facts.setTextFormat(Qt.TextFormat.RichText)
         self.facts.setToolTip(
@@ -568,6 +606,7 @@ class Window(QWidget):
         for tile, btn in self.tiles.items():
             btn.setChecked(tile == mode)
         self.active.clear()
+        self._drop_draft()
         self.player.stop()
         self.refresh()
         if self.list.count():
@@ -579,9 +618,16 @@ class Window(QWidget):
             self.list.setCurrentRow(0)
 
     def _set_sort(self, key: str) -> None:
-        self.sort = key
+        """
+        One choice with four settings, and a way out of all of them.
+
+        Clicking the sort that is already on clears it, which puts the list
+        back in the order `rv.queue` returns - the order of the queue itself,
+        which no button could otherwise ask for.
+        """
+        self.sort = None if key == self.sort else key
         for k, b in self.sorts.items():
-            b.setChecked(k == key)
+            b.setChecked(k == self.sort)
         self.refresh()
         if self.list.count():
             self.list.setCurrentRow(0)
@@ -616,13 +662,28 @@ class Window(QWidget):
                     if needle in " ".join((s["artist"], s["title"],
                                            s["video"], s["channel"])).lower()]
         self.songs = pool
-        # 'doubt' is the order rv.queue already returns.
-        if self.sort == "artist":
+        # Approved and Save for later are lists of things you did, and the
+        # thing you did last is the one you come back to. Recency wins over
+        # the sort control there, whatever it is set to. Sorted twice because
+        # Python's sort is stable: names break ties between two decisions
+        # made in the same second.
+        if self.mode in ("approved", "later"):
+            self.songs.sort(key=lambda s: (s["artist"].lower(),
+                                           s["title"].lower()))
+            self.songs.sort(key=lambda s: s["updated_at"] or "", reverse=True)
+        elif self.sort == "artist":
             self.songs.sort(key=lambda s: (s["artist"].lower(),
                                            s["title"].lower()))
         elif self.sort == "title":
             self.songs.sort(key=lambda s: (s["title"].lower(),
                                            s["artist"].lower()))
+        elif self.sort == "doubt":
+            self.songs.sort(key=lambda s: (-s["risk"], s["artist"].lower(),
+                                           s["title"].lower()))
+        elif self.sort == "doubt_asc":
+            self.songs.sort(key=lambda s: (s["risk"], s["artist"].lower(),
+                                           s["title"].lower()))
+        # self.sort is None: the order rv.queue returned, untouched.
 
         # The number on a tile is the size of the tile, not of the filtered
         # list: it is there to say where the work is, and a search that hides
@@ -670,6 +731,9 @@ class Window(QWidget):
             return
         s = self.songs[row]
         self.current = s["song_dir"]
+        # Leaving a song is the same as not having answered: a draft belongs
+        # to the song it was typed against and does not follow you.
+        self._drop_draft()
         self.player.stop()
 
         # The song above, the video below. They were run together on one
@@ -680,18 +744,7 @@ class Window(QWidget):
         self.by.setText(s["video"] + (f" · {s['channel']}"
                                       if s["channel"] else ""))
 
-        off = s["offset_ms"] or 0
-        moves = ("video waits" if off < 0 else
-                 "video skips ahead" if off > 0 else "aligned")
-        self.facts.setText(
-            f"<span style='color:{DIM}'>offset</span> {off:+,.0f} ms "
-            f"<span style='color:{DIM}'>{moves}</span> &nbsp;&nbsp;"
-            f"<span style='color:{DIM}'>spread</span> "
-            f"{s['spread_text']} &nbsp;&nbsp;"
-            f"<span style='color:{DIM}'>match</span> "
-            f"{(s['fp_score'] or 0):.0f} &nbsp;&nbsp;"
-            f"<span style='color:{DIM}'>motion</span> "
-            + ("still image" if s["static"] else f"{s['motion'] or 0:.2f}"))
+        self._show_facts(s, s["offset_ms"] or 0)
         self.flags.setText("\n".join("— " + r for r in s["reasons"]))
 
         # The pre-existing-video notice is one of the reasons printed above
@@ -736,6 +789,39 @@ class Window(QWidget):
         self.full_btn.setEnabled(True)
         self._queue_build(full=False)
 
+    def _song(self) -> dict | None:
+        """The row on screen, or None if the selection is gone."""
+        return next((x for x in self.songs if x["song_dir"] == self.current),
+                    None)
+
+    def _drop_draft(self) -> None:
+        """Forget an unsaved offset and put Save and Undo away with it."""
+        self.draft_offset = None
+        self.save_offset_btn.setEnabled(False)
+        self.undo_offset_btn.setEnabled(False)
+
+    def _show_facts(self, s: dict, off: float) -> None:
+        """
+        The figures line, rendered at whatever offset is on screen.
+
+        `off` rather than the stored value, because a draft has to show the
+        number you would be saving. It is marked as a draft: an offset that
+        reads exactly like a saved one is a way to believe you pressed Save.
+        """
+        moves = ("video waits" if off < 0 else
+                 "video skips ahead" if off > 0 else "aligned")
+        draft = (f" <span style='color:{DIM}'>draft</span>"
+                 if self.draft_offset is not None else "")
+        self.facts.setText(
+            f"<span style='color:{DIM}'>offset</span> {off:+,.0f} ms "
+            f"<span style='color:{DIM}'>{moves}</span>{draft} &nbsp;&nbsp;"
+            f"<span style='color:{DIM}'>spread</span> "
+            f"{s['spread_text']} &nbsp;&nbsp;"
+            f"<span style='color:{DIM}'>match</span> "
+            f"{(s['fp_score'] or 0):.0f} &nbsp;&nbsp;"
+            f"<span style='color:{DIM}'>motion</span> "
+            + ("still image" if s["static"] else f"{s['motion'] or 0:.2f}"))
+
     def _clear_player(self) -> None:
         """
         Leave nothing of the last song on screen.
@@ -765,7 +851,8 @@ class Window(QWidget):
         if self.current is None:
             return
         job = ClipJob(self.db_path, self.work, self.current,
-                      full=self._pending_full, token=self._token)
+                      full=self._pending_full, token=self._token,
+                      offset_ms=self.draft_offset)
         job.signals.done.connect(self._clip_ready)
         self._job = job                 # keep alive until it finishes
         self.pool.start(job)
@@ -978,8 +1065,6 @@ class Window(QWidget):
         """
         if self.url.hasFocus() and self.url.text().strip():
             self._act("replace")
-        elif self.offset_box.hasFocus() and self.offset_box.text().strip():
-            self._apply_offset()
         else:
             self._act("keep")
 
@@ -991,25 +1076,43 @@ class Window(QWidget):
 
     # --------------------------------------------------------------- actions
     def _nudge(self, delta_ms: int) -> None:
-        """Move this song's offset by a step and lock it there."""
-        s = next((x for x in self.songs if x["song_dir"] == self.current), None)
+        """
+        Move the draft offset by a step and rebuild the clip at it.
+
+        Nothing is written. A step used to lock the song the moment it was
+        pressed, which made trying a value and finding out it was wrong a
+        thing you had to undo through the database.
+        """
+        s = self._song()
         if s is None:
             return
-        self._store_offset((s["offset_ms"] or 0.0) + delta_ms)
+        base = (self.draft_offset if self.draft_offset is not None
+                else (s["offset_ms"] or 0.0))
+        self.draft_offset = float(base + delta_ms)
+        self.save_offset_btn.setEnabled(True)
+        self.undo_offset_btn.setEnabled(True)
+        self._show_facts(s, self.draft_offset)
+        self._queue_build(full=False)
 
-    def _apply_offset(self) -> None:
-        """Set this song's offset to the figure in the box and lock it."""
-        text = self.offset_box.text().strip()
-        if self.current is None or not text:
+    def _save_offset(self) -> None:
+        """Lock the song to the draft."""
+        if self.draft_offset is None:
             return
-        try:
-            value = float(text)
-        except ValueError:
-            QMessageBox.warning(
-                self, "Not a number",
-                "Type the offset in milliseconds, e.g. -2500.")
-            return
+        value = self.draft_offset
+        # Cleared before the write, so the rebuild the write triggers is the
+        # one for the saved value rather than for a draft that no longer
+        # differs from it.
+        self._drop_draft()
         self._store_offset(value)
+
+    def _undo_offset(self) -> None:
+        """Throw the draft away and go back to what is stored."""
+        s = self._song()
+        if s is None or self.draft_offset is None:
+            return
+        self._drop_draft()
+        self._show_facts(s, s["offset_ms"] or 0.0)
+        self._queue_build(full=False)
 
     def _store_offset(self, offset_ms: float) -> None:
         """
@@ -1031,7 +1134,6 @@ class Window(QWidget):
         finally:
             db.close()
         self.player.stop()
-        self.offset_box.clear()
         self.refresh()
         # Reselect the song, not the row. The row number usually does not
         # move, and setCurrentRow to the row already current emits nothing -
