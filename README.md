@@ -120,6 +120,7 @@ Stage flags worth knowing:
 | `--gate N` | `match` | override the fingerprint accept score for this run |
 | `--redo` | `match` | re-attempt only songs that previously failed |
 | `--recheck` | `sync` | recompute already-synced songs and write only what changed |
+| `--songs F` | `match`, `sync` | run only the song folders listed in file `F`, one per line |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
 | `--skip-static` | `encode` | leave album-art backgrounds unencoded |
 | `--skip-existing` | `encode` | leave folders that already hold a `video.webm` |
@@ -143,6 +144,7 @@ Stage flags worth knowing:
 | `reviewed` | which songs you have confirmed by eye |
 | `diagnose` | one song's match, verbosely, from search to gate |
 | `export` | every measurement for every song, as CSV |
+| `bench` | how often a matching policy picks the video you approved or chose yourself |
 
 Each of `candidates`, `offsets`, `blocks`, `inspect`, `links` and `diagnose`
 takes a substring of the song folder path.

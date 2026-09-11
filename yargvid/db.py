@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     duration   REAL,
     score      REAL,
     coverage   REAL,
+    view_count INTEGER,
     PRIMARY KEY (song_dir, video_id)
 );
 """
@@ -100,6 +101,15 @@ class Database:
                           ("video_seconds", "REAL")):
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
+        # Same for the candidates table. CREATE TABLE IF NOT EXISTS leaves an
+        # older table exactly as it was, so a column added to SCHEMA never
+        # reaches a database made before it.
+        existing = {r[1] for r in
+                    self.conn.execute("PRAGMA table_info(candidates)")}
+        for col, decl in (("view_count", "INTEGER"),):
+            if col not in existing:
+                self.conn.execute(
+                    f"ALTER TABLE candidates ADD COLUMN {col} {decl}")
         self.conn.commit()
 
     def close(self) -> None:
@@ -140,11 +150,13 @@ class Database:
     def save_candidates(self, song_dir: Path, candidates) -> None:
         self.conn.executemany(
             "INSERT OR REPLACE INTO candidates "
-            "(song_dir, video_id, title, uploader, duration, score, coverage) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(song_dir, video_id, title, uploader, duration, score, coverage, "
+            " view_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (str(song_dir), c.video_id, c.title, c.uploader,
-                 c.duration, c.score, c.coverage)
+                 c.duration, c.score, c.coverage,
+                 getattr(c, "view_count", None))
                 for c in candidates
             ],
         )

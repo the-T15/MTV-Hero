@@ -87,6 +87,12 @@ PENALISE_TERMS = (
     ("chart preview", -12.0), ("custom song", -10.0), ("gameplay", -12.0),
     ("expert+", -12.0), ("100% fc", -12.0), ("full combo", -12.0),
     ("drum cover", -10.0), ("bass cover", -10.0), ("midi", -9.0),
+    # A montage cut to the song is not the song's video, and "Behind The
+    # Curtain" is the making-of series under another name.
+    ("behind the curtain", -10.0), ("montage", -6.0),
+    # Rock Band disc abbreviations. These appear in the titles of chart
+    # previews and gameplay captures that "rock band" alone does not catch.
+    ("rb2", -10.0), ("rb3", -10.0), ("rb4", -10.0), ("rbn", -10.0),
 )
 
 
@@ -226,6 +232,9 @@ class Candidate:
     score: float = 0.0
     offset_s: float = 0.0
     coverage: float = 0.0
+    # Comes back with every search result at no extra cost. Nothing ranks on
+    # it yet; it is stored so a policy can be measured against it later.
+    view_count: int | None = None
 
 
 def parse_video_id(url_or_id: str) -> str | None:
@@ -316,6 +325,22 @@ def cookie_args(cookies: str | None) -> list[str]:
     return ["--cookies-from-browser", cookies]
 
 
+def _views(raw) -> int | None:
+    """
+    The search result's view count, or None.
+
+    A flat-playlist entry omits the field for some uploads and occasionally
+    carries a string. Neither is an error worth failing a search over, so both
+    read as "not known" rather than zero - zero is a real view count.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def search_candidates(
     artist: str, title: str, chart_seconds: float,
     cookies: str | None = None, sleep: float = 0.0,
@@ -353,6 +378,7 @@ def search_candidates(
                 title=d.get("title") or "",
                 uploader=d.get("uploader") or d.get("channel") or "",
                 duration=dur,
+                view_count=_views(d.get("view_count")),
             )
         if len(seen) >= CANDIDATE_POOL:
             break

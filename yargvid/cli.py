@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import audio as au
+from . import bench as bn
 from . import encode as enc
 from . import fingerprint as fp
 from . import match as mt
@@ -37,6 +38,56 @@ def covers_song(video_s: float, offset_ms: float, chart_s: float) -> bool:
     test after the first was fixed.
     """
     return (video_s - offset_ms / 1000.0) >= chart_s - 5
+
+
+# --------------------------------------------------------------- song lists ---
+
+def read_song_list(path: str | Path) -> list[str]:
+    """
+    The song folders named by a `--songs` file, in file order.
+
+    One path per line. Blank lines and `#` comments are skipped so a list can
+    be annotated - these files are written by hand and pasted out of bench
+    output, and a list you cannot comment is a list you rewrite from scratch
+    every time. utf-8-sig because Notepad and PowerShell's `>` both write a
+    BOM, and a leading ﻿ turns the first path into one nothing matches.
+    """
+    out: list[str] = []
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            out.append(s)
+    return out
+
+
+def _path_key(s: str) -> str:
+    """
+    A song folder path in the one form two spellings of it share.
+
+    The database stores whatever `str(Path(...))` produced at index time, but
+    a list file is typed or pasted, and on Windows 'C:/lib/Song' and
+    'C:\\lib\\Song' are the same folder. normcase folds the separator and the
+    case together, which is exactly the comparison the filesystem makes.
+    """
+    return os.path.normcase(str(Path(s)))
+
+
+def _listed_rows(db: Database, path: str | Path):
+    """
+    Resolve a `--songs` file to rows, in file order, plus the lines that
+    named no song at all.
+
+    Exact folders, not substrings: a list is a selection someone already made,
+    and a fuzzy match on it would quietly run the stage against songs that are
+    not on it.
+    """
+    by_key = {_path_key(r["song_dir"]): r
+              for r in db.conn.execute("SELECT * FROM songs")}
+    rows, missing = [], []
+    for line in read_song_list(path):
+        r = by_key.get(_path_key(line))
+        (rows if r is not None else missing).append(r if r is not None else line)
+    return rows, missing
 
 
 # ---------------------------------------------------------------- song.ini ---
@@ -219,12 +270,30 @@ def cmd_match(args, db: Database) -> None:
         fp.ACCEPT_SCORE = args.gate
 
     work = Path(args.work)
-    if getattr(args, "redo", False):
+    listed = getattr(args, "songs", None)
+    if listed:
+        # A list is the selection outright - status included. The point of
+        # re-matching a named set is to see what a changed rule does to songs
+        # that already have an answer, which `pending` by definition excludes.
+        rows, missing = _listed_rows(db, listed)
+        for line in missing:
+            print(f"  not in the database, skipped: {line}")
+        held = [r for r in rows
+                if (r["match_note"] or "").startswith("MANUAL")]
+        for r in held:
+            print(f"  your pick, left alone: {r['artist']} - {r['title']}")
+        rows = [r for r in rows
+                if not (r["match_note"] or "").startswith("MANUAL")]
+        if args.limit:
+            rows = rows[: args.limit]
+        print(f"{len(rows)} songs to match from {listed}")
+    elif getattr(args, "redo", False):
         rows = db.retry_queue("match", args.limit)
         print("re-attempting previously failed matches only")
+        print(f"{len(rows)} songs to match")
     else:
         rows = db.pending("match", args.limit, getattr(args, "sample", False))
-    print(f"{len(rows)} songs to match")
+        print(f"{len(rows)} songs to match")
 
     for n, row in enumerate(rows, 1):
         d = Path(row["song_dir"])
@@ -239,6 +308,17 @@ def cmd_match(args, db: Database) -> None:
             chart, row["artist"], row["title"], work, args.cookies, args.sleep
         )
         db.save_candidates(d, candidates)
+
+        # A row that already had a video and now has a different one - or none
+        # at all - is carrying a download, an offset and possibly an approval
+        # that all belong to the video being replaced. Re-matching in place
+        # without clearing them leaves sync and encode operating on the old
+        # file while match claims the new one, which is the exact failure
+        # `set` and `reset` were both written to prevent.
+        old_vid = row["video_id"]
+        new_vid = winner.video_id if winner is not None else None
+        if old_vid and old_vid != new_vid:
+            _requeue_after_match(db, d, row)
 
         if winner is None:
             db.update(d, match_status="failed", match_note=reason)
@@ -265,6 +345,23 @@ def cmd_match(args, db: Database) -> None:
             print(f"       channel: {who}")
 
 
+def _requeue_after_match(db: Database, d: Path, row) -> None:
+    """Send every stage after `match` back to pending. The `set` field list."""
+    old = row["source_path"]
+    if old and Path(old).exists():
+        Path(old).unlink(missing_ok=True)
+    db.update(
+        d,
+        download_status="pending", source_path=None,
+        sync_status="pending", offset_ms=None, spread_ms=None,
+        drift_ppm=None, sync_note=None, fp_score=None,
+        motion=None, dominance=None, windows=None, video_seconds=None,
+        review=None,
+        encode_status="pending", encode_note=None,
+        ini_status="pending",
+    )
+
+
 def cmd_download(args, db: Database) -> None:
     rows = db.pending("download", args.limit, getattr(args, "sample", False))
     print(f"{len(rows)} videos to download")
@@ -284,7 +381,29 @@ def cmd_download(args, db: Database) -> None:
 
 def cmd_sync(args, db: Database) -> None:
     recheck = getattr(args, "recheck", False)
-    if recheck:
+    listed = getattr(args, "songs", None)
+    if listed:
+        # A named list is always re-measured under the recheck rules, whatever
+        # each song's sync_status is. Half a list at 'pending' and half at 'ok'
+        # is the normal shape of a bench follow-up, and the recheck rules are
+        # the ones that already say what happens to an approval either way:
+        # it survives an answer that has not moved and dies with one that has.
+        # --min-offset and --skip-reviewed are filters over the whole library,
+        # so they have nothing to filter here.
+        rows, missing = _listed_rows(db, listed)
+        for line in missing:
+            print(f"  not in the database, skipped: {line}")
+        for r in rows:
+            if not r["source_path"]:
+                print(f"  no video downloaded, skipped: "
+                      f"{r['artist']} - {r['title']}")
+        rows = [r for r in rows if r["source_path"]]
+        if args.limit:
+            rows = rows[: args.limit]
+        recheck = True
+        print(f"Re-syncing {len(rows)} songs from {listed}"
+              " - only changes will be written")
+    elif recheck:
         # Recompute already-synced songs and write ONLY where the answer
         # changes. Anything that comes out the same is left completely alone,
         # so review marks and encode state survive - unlike `retry sync --all`,
@@ -1167,6 +1286,68 @@ def cmd_export(args, db: Database) -> None:
     print(f"\nWritten to {out.resolve()}")
 
 
+def cmd_bench(args, db: Database) -> None:
+    """
+    Score a matching policy against the songs a person has ruled on.
+
+    Reads the stored candidates and writes one CSV. It runs no yt-dlp, decodes
+    no audio and touches no song row - the whole point is that a policy can be
+    tried, read and thrown away without costing a re-download or leaving the
+    library in a state anyone has to undo.
+    """
+    import csv
+
+    # Same rule as `export`: the file a policy was measured into is the only
+    # record of what that policy did, and the next run's default name is the
+    # same one.
+    out = Path(args.out or f"yargvid_bench_{args.policy}.csv")
+    if out.exists() and not getattr(args, "force", False):
+        print(f"{out} already exists.")
+        print("Pass a different --out, or --force to overwrite it.")
+        return
+
+    rows = bn.run(db, args.policy)
+    if not rows:
+        print("No stored candidates to score. Run `match` first.")
+        return
+    s = bn.summary(rows)
+
+    print(f"policy: {args.policy}   {len(rows)} songs with stored candidates\n")
+    for cls in ("approval", "override"):
+        c = s[cls]
+        rate = (f"{100.0 * c['win'] / c['reachable']:.1f}%"
+                if c["reachable"] else "-")
+        print(f"{cls:9} labelled {c['labelled']:5}   "
+              f"reachable {c['reachable']:5}   gated {c['gated']:5}   "
+              f"absent {c['absent']:5}   won {c['win']:5}   {rate} of reachable")
+    u = s["unlabelled"]
+    print(f"{'unlabelled':9} songs {u['songs']:8}   "
+          f"would change {u['differs']}")
+
+    misses = [r for r in rows
+              if r["label"] and r["known_status"] == "reachable"
+              and not r["win"]]
+    if misses:
+        plural = "" if len(misses) == 1 else "s"
+        print(f"\n{len(misses)} winnable song{plural} the policy got wrong:")
+        for r in misses:
+            print(f"  [{r['label']}] {r['artist']} - {r['title']}: "
+                  f"picked {r['policy_pick'] or '(nothing)'} "
+                  f"over {r['known_video']}")
+
+    fields = list(rows[0].keys())
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            # True/False/None reads as 1/0/blank so a spreadsheet can sum the
+            # column; an unlabelled song has no win to record either way.
+            rec = dict(r)
+            rec["win"] = "" if r["win"] is None else int(r["win"])
+            w.writerow(rec)
+    print(f"\nWritten to {out.resolve()}")
+
+
 def cmd_blocks(args, db: Database) -> None:
     """Show which stretches of a song align, and at what offset. Read-only."""
     row = _one_song(db, args.pattern)
@@ -1429,6 +1610,9 @@ def main(argv=None) -> int:
                         f"(default {fp.ACCEPT_SCORE:.0f})")
     s.add_argument("--redo", action="store_true",
                    help="only re-attempt songs that previously failed")
+    s.add_argument("--songs", default=None,
+                   help="re-match exactly the song folders listed in this "
+                        "file, one per line, whatever their status")
     s.set_defaults(fn=cmd_match)
 
     s = sub.add_parser("download", help="fetch the winning videos")
@@ -1446,6 +1630,9 @@ def main(argv=None) -> int:
     s.add_argument("--skip-reviewed", action="store_true",
                    help="with --recheck, leave songs you have already "
                         "confirmed alone")
+    s.add_argument("--songs", default=None,
+                   help="re-sync exactly the song folders listed in this "
+                        "file, one per line, under the --recheck rules")
     s.set_defaults(fn=cmd_sync)
 
     s = sub.add_parser("encode", help="transcode to VP8 webm")
@@ -1522,6 +1709,15 @@ def main(argv=None) -> int:
     s.add_argument("--force", action="store_true",
                    help="overwrite the output file if it already exists")
     s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("bench", help="score a matching policy against your "
+                                     "approvals and overrides")
+    s.add_argument("--policy", choices=sorted(bn.POLICIES), default="current")
+    s.add_argument("--out", default=None,
+                   help="CSV to write (default yargvid_bench_<policy>.csv)")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite the output file if it already exists")
+    s.set_defaults(fn=cmd_bench)
 
     s = sub.add_parser("videos", help="which folders already hold a video")
     s.add_argument("--quiet", action="store_true", help="counts only")
