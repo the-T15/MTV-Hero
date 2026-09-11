@@ -33,6 +33,7 @@ from . import audio as au
 from . import encode as enc
 from . import fingerprint as fp
 from .db import Database
+from .match import FAN_MV_MARK
 
 # 15 s, not 12: twelve was long enough to see a beat land and too short to
 # see one drift away from the beat after it.
@@ -58,6 +59,7 @@ TAG_LABELS = {
     "weak":      "weak match",
     "channel":   "third-party",
     "audio":     "audio only",
+    "fan_mv":    "fan MV available",
     "flat":      "no clear alignment",
     "unverified": "unverified",
     "unsteady":  "unsteady",
@@ -90,7 +92,7 @@ TILE_LABELS = {
 # opposed to the ones that describe what the video is. Together they are the
 # Unsure tile, and inside it they are the filter chips.
 DOUBT_TAGS = frozenset({"weak", "unverified", "unsteady", "shift", "drift",
-                        "audio", "short", "flat", "low_motion"})
+                        "audio", "short", "flat", "low_motion", "fan_mv"})
 
 # The top of the band that is moving but barely: a slideshow, a lyric card
 # with a drifting background, a single locked-off camera. A guess until the
@@ -218,7 +220,14 @@ def assess(row) -> Risk:
     # is not worth having.
     if note.startswith("REVIEW:"):
         pts += 1
-        why.append(("audio", "titled as audio, not a video"))
+        if FAN_MV_MARK in note:
+            # Not the same complaint. The pick is an official channel's
+            # visualizer or lyric video - a real picture, correctly chosen -
+            # and somewhere below it a stranger uploaded the music video.
+            why.append(("fan_mv",
+                        "a third-party music video is available - compare"))
+        else:
+            why.append(("audio", "titled as audio, not a video"))
 
     # Peak dominance is recorded but deliberately NOT ranked on. Measured
     # across 172 songs, 21 of the 71 confirmed correct by eye fell below 5x -

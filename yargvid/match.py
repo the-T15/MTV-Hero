@@ -216,6 +216,114 @@ def channel_bonus(uploader: str, chart_text: str = "") -> float:
         return 3.0
     return 0.0
 
+# --------------------------------------------------------------- the policy ---
+#
+# The shipped rule added the channel bonus to the title score, so a big enough
+# title number swamped the channel: a stranger's "Official Music Video" (15.5)
+# beat the label's "Official Video" on its own channel (6.5 + 3). The policy
+# below ranks lexicographically instead, so the channel is decided before the
+# title is ever read.
+
+FAN_MV_MARK = "fan MV available"
+
+# The positive `channel_bonus` values, ascending: a label, VEVO, the artist's
+# own channel. Read as thresholds rather than matched as values, so a new
+# official channel kind lands in the right tier by its bonus alone.
+OFFICIAL_TIERS = (3.0, 4.0, 7.0)
+
+
+def channel_class(uploader: str, chart_text: str = "",
+                  tiered: bool = False) -> int:
+    """
+    Which class of channel this is. Higher is better; ranked before the title.
+
+    Derived from `channel_bonus` rather than re-testing the uploader, so the
+    two can never disagree about what counts as official. Flat (the default):
+    an auto-generated Topic channel is 0, a stranger 1, anything official 2.
+    `tiered` splits that top class the way the bonus already orders it -
+    label 2, VEVO 3, the artist's own channel 4.
+    """
+    bonus = channel_bonus(uploader, chart_text)
+    if bonus < 0:
+        return 0
+    if bonus == 0:
+        return 1
+    if not tiered:
+        return 2
+    return 2 + sum(1 for tier in OFFICIAL_TIERS if bonus > tier)
+
+
+def policy_key(c: "Candidate", chart_text: str = "",
+               tiered: bool = False) -> tuple[int, float, int]:
+    """
+    The ranking key: channel class, then title, then views.
+
+    The fingerprint score is deliberately NOT in here. It is identity, not
+    preference - everything being ranked has already cleared the gate - and
+    rankers append it themselves as the final tie-break. An unknown view
+    count sorts as -1, below a genuine zero: a row stored before the column
+    existed is not evidence of an unwatched video.
+    """
+    return (
+        channel_class(c.uploader, chart_text, tiered),
+        title_score(c.title, chart_text),
+        c.view_count if c.view_count is not None else -1,
+    )
+
+
+def _rank(candidates: list["Candidate"], chart_text: str,
+          tiered: bool) -> list["Candidate"]:
+    passers = [
+        c for c in candidates
+        if c.score >= fp.ACCEPT_SCORE and c.coverage >= fp.ACCEPT_COVERAGE
+    ]
+    passers.sort(key=lambda c: (policy_key(c, chart_text, tiered), c.score),
+                 reverse=True)
+    return passers
+
+
+def rank_official(candidates: list["Candidate"],
+                  chart_text: str) -> list["Candidate"]:
+    """One official class: artist, label and VEVO are decided by their titles."""
+    return _rank(candidates, chart_text, False)
+
+
+def rank_artist_first(candidates: list["Candidate"],
+                      chart_text: str) -> list["Candidate"]:
+    """Three official classes: artist > VEVO > label, whatever they posted."""
+    return _rank(candidates, chart_text, True)
+
+
+RANKERS = {"official": rank_official, "artist_first": rank_artist_first}
+
+# Which of them `pick_best` applies. The bench decides this; both stay
+# registered so the loser remains measurable.
+POLICY = "official"
+
+
+def fan_mv(ranked: list["Candidate"], chart_text: str = "") -> "Candidate | None":
+    """
+    The third-party music video that lost to an official non-music video.
+
+    The pick is right by policy - a band's own visualizer is the official
+    release - and a stranger's upload of the actual video is still worth a
+    look, so the song is flagged rather than re-ranked. A plain title scores
+    zero and says nothing either way: it is never the flag and never flagged.
+    """
+    if not ranked:
+        return None
+    top = ranked[0]
+    if channel_bonus(top.uploader, chart_text) <= 0:
+        return None
+    if title_score(top.title, chart_text) >= 0:
+        return None
+    for c in ranked[1:]:
+        if (channel_bonus(c.uploader, chart_text) == 0
+                and title_score(c.title, chart_text) > 0):
+            return c
+    return None
+
+
 QUERY_TEMPLATES = [
     "{artist} {title} official music video",
     "{artist} {title} official video",
@@ -452,14 +560,18 @@ def pick_best(
     # instead of ten. Ordering is a heuristic; acceptance still requires the
     # fingerprint gate below.
     chart_text = f"{artist} {title}"
+    tiered = POLICY == "artist_first"
     candidates.sort(
-        key=lambda c: title_preference(c.title, c.uploader, chart_text),
+        key=lambda c: policy_key(c, chart_text, tiered),
         reverse=True,
     )
 
-    prefs = [title_preference(c.title, c.uploader, chart_text) for c in candidates]
+    prefs = [policy_key(c, chart_text, tiered) for c in candidates]
     best: Candidate | None = None
-    best_pref = 0.0
+    # The empty tuple is below every key, so the first gate passer always
+    # takes it. A zero would have been a real preference, and a candidate
+    # ranking below zero could never have become the best.
+    best_pref: tuple = ()
 
     for i, cand in enumerate(candidates):
         path, err = probe_audio(cand.video_id, work_dir, cookies, sleep)
@@ -493,7 +605,16 @@ def pick_best(
         # look ahead: Knife Party's official video passed at position 0 but a
         # tie prevented stopping there, and a later, much weaker candidate then
         # found nothing above it remaining and would have won by default.
+        # One exception: when the best is an official channel's non-music
+        # video, a third-party candidate titled as the music video is worth
+        # the download even though it cannot win. It is what `fan_mv` flags,
+        # and the flag can only fire on a candidate that was actually heard.
         if best is not None and all(p < best_pref for p in prefs[i + 1:]):
+            if (title_score(best.title, chart_text) < 0
+                    and any(channel_bonus(c.uploader, chart_text) == 0
+                            and title_score(c.title, chart_text) > 0
+                            for c in candidates[i + 1:])):
+                continue
             break
 
     # No candidate was ever heard. This is a download problem, not a matching
@@ -516,6 +637,13 @@ def pick_best(
         )
 
     candidates.sort(key=lambda c: c.score, reverse=True)
+
+    # The pick is right by policy and there is still a music video to look at.
+    # This outranks the static-image flag: both say "come and look", and the
+    # fan MV names the video to look at.
+    alt = fan_mv(RANKERS[POLICY](candidates, chart_text), chart_text)
+    if alt is not None:
+        return best, candidates, f"ok ({FAN_MV_MARK}: {alt.video_id} - review)"
 
     # It passed the gate, but the background will be a still image rather than
     # footage. Better than nothing, so keep it - and flag it for review.

@@ -61,7 +61,10 @@ def rank_current(candidates: list[mt.Candidate],
     return passers
 
 
-POLICIES = {"current": rank_current}
+# `current` is the baseline and never changes. The rest come from
+# `match.RANKERS`, so the bench measures the code that ships rather than a
+# copy of it, and the policy `pick_best` did not take stays measurable.
+POLICIES = {"current": rank_current, **mt.RANKERS}
 
 
 def label_of(song) -> str:
@@ -129,6 +132,7 @@ def run(db, policy: str = "current") -> list[dict]:
         chart_text = f"{s['artist'] or ''} {s['title'] or ''}".strip()
         ranked = rank(cands, chart_text)
         pick = ranked[0].video_id if ranked else ""
+        alt = mt.fan_mv(ranked, chart_text)
 
         label = label_of(s)
         known = s["video_id"] if label else ""
@@ -146,6 +150,13 @@ def run(db, policy: str = "current") -> list[dict]:
             "policy_pick": pick,
             "current_video": s["video_id"] or "",
             "win": (pick == known) if label else None,
+            "fan_mv": alt.video_id if alt else "",
+            # How much of the ranked field the view tie-break can actually
+            # see. Nothing stored before the column existed carries a count,
+            # so a coverage of zero means the tie-break was never exercised -
+            # which is a fact about the data, not a result.
+            "ranked": len(ranked),
+            "views_known": sum(1 for c in ranked if c.view_count is not None),
         })
     return out
 
@@ -179,5 +190,9 @@ def summary(rows: list[dict]) -> dict[str, dict[str, int]]:
         differs=sum(1 for r in plain
                     if r["current_video"]
                     and r["policy_pick"] != r["current_video"]),
+    )
+    out["views"] = dict(
+        ranked=sum(r["ranked"] for r in rows),
+        known=sum(r["views_known"] for r in rows),
     )
     return out

@@ -329,18 +329,27 @@ def cmd_match(args, db: Database) -> None:
             # that marker so `status` can surface it for review rather than
             # letting it disappear behind a successful-looking line.
             flagged = reason != "ok"
+            # The reason reads "ok (<why> - review)". The note keeps <why>
+            # and the printed line says it, so a fan MV and a static image
+            # are told apart at a glance instead of both reading "static
+            # image".
+            why = reason[len("ok ("):-len(" - review)")] if flagged else ""
             # Record the uploader. No heuristic can tell an official video
             # from a fan edit by title, but the channel usually can - and it
             # costs nothing to store, unlike another flag that would add noise.
             who = winner.uploader or "unknown channel"
             note = f"{winner.title} [{who}]"
-            if flagged:
+            if mt.FAN_MV_MARK in reason:
+                # The channel stays in its brackets at the end, where
+                # `review.assess` reads it.
+                note = f"REVIEW: {why} - {note}"
+            elif flagged:
                 note = f"REVIEW: {note}"
             db.update(
                 d, match_status="ok", video_id=winner.video_id,
                 match_score=winner.score, match_note=note,
             )
-            mark = "  [REVIEW - static image]" if flagged else ""
+            mark = f"  [REVIEW - {why}]" if flagged else ""
             print(f"    -> {winner.title} (score {winner.score:.0f}){mark}")
             print(f"       channel: {who}")
 
@@ -1323,6 +1332,11 @@ def cmd_bench(args, db: Database) -> None:
     u = s["unlabelled"]
     print(f"{'unlabelled':9} songs {u['songs']:8}   "
           f"would change {u['differs']}")
+    v = s["views"]
+    # The view tie-break can only separate candidates that carry a count, and
+    # nothing stored before Batch 7 does. Printed rather than assumed.
+    print(f"{'views':9} known for {v['known']} of {v['ranked']} "
+          f"ranked candidates")
 
     misses = [r for r in rows
               if r["label"] and r["known_status"] == "reachable"
