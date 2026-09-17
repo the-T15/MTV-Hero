@@ -86,7 +86,6 @@ yargvid download
 yargvid sync
 yargvid review              # check the results
 yargvid encode --reviewed
-yargvid ini
 ```
 
 `--limit N` and `--sample` are options of `yargvid` itself, so they go **before**
@@ -110,7 +109,7 @@ hours to the whole library.
 | `sync` | measure and verify the offset |
 | `review` | watch proof clips and approve, defer, replace or drop |
 | `encode` | transcode to VP8/WebM |
-| `ini` | write `video_start_time` into `song.ini` |
+| `ini` | repair: write `video_start_time` for rows that encoded but whose `song.ini` is still pending |
 | `retry <stage>` | send a stage's failures back to pending (`--all` for every row) |
 
 Stage flags worth knowing:
@@ -122,7 +121,10 @@ Stage flags worth knowing:
 | `--recheck` | `sync` | recompute already-synced songs and write only what changed |
 | `--songs F` | `match`, `sync` | run only the song folders listed in file `F`, one per line |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
-| `--skip-static` | `encode` | leave album-art backgrounds unencoded |
+| `--bitrate-cap C` | `encode` | ceiling for constant-quality mode (default `4M`) |
+| `--max-fps N` | `encode` | cap the frame rate (default 30); slower sources keep their own |
+| `--skip-static` | `encode` | leave album-art backgrounds unencoded (the default) |
+| `--include-static` | `encode` | encode album-art backgrounds too |
 | `--skip-existing` | `encode` | leave folders that already hold a `video.webm` |
 | `--reviewed` | `encode` | only songs you approved by eye |
 | `--mark` | `videos` | record which songs already had a video, for review |

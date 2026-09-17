@@ -5,6 +5,30 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+### Added
+- `encode --bitrate-cap` (default `4M`) and `encode --max-fps` (default 30):
+  the two settings `cmd_encode` never passed are now flags.
+- `encode --include-static`: skipping album-art backgrounds is the default,
+  and this turns it off.
+
+### Changed
+- Default bitrate cap `2M` -> `4M`, so at 1080p `-crf 31` governs and the cap
+  is a ceiling rather than the operating point.
+- `encode` writes `video_start_time` itself and sets `ini_status='ok'` in the
+  same update as `encode_status='ok'`; `ini` is now the repair command for
+  rows that encoded but whose `song.ini` is still pending.
+- `--preview` runs through the worker pool, so `--workers` applies to it. A
+  preview writes the ini but leaves `encode_status` pending.
+
+### Fixed
+- A successful encode stored `""` in `encode_note` where the schema holds
+  NULL; every other stage writes NULL.
+- A `song.ini` that cannot be written no longer aborts the encode run. The
+  callback that writes it runs inside the worker pool's block, so a raise
+  there left every queued song encoded, its source deleted and its row
+  unwritten. The row now stays `encode_status='ok'` with `ini_status`
+  pending, which is what `ini` repairs.
+
 ## [0.4.0] — 2026-09-11
 
 ### Added

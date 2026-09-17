@@ -47,7 +47,7 @@ from . import audio as au
 class EncodeSettings:
     height: int = 1080          # 720 roughly halves encode time
     crf: int = 31               # VP8 CQ: 4-63, lower is better quality
-    bitrate_cap: str = "2M"     # ceiling for CQ mode - NOT 0 for VP8
+    bitrate_cap: str = "4M"     # ceiling for CQ mode - NOT 0 for VP8
     cpu_used: int = 3           # 0-5 with `-deadline good`; higher = faster
     threads_per_job: int = 2
     drop_audio: bool = True
@@ -278,14 +278,22 @@ def encode_many(
     settings: EncodeSettings,
     workers: int | None = None,
     on_done=None,
+    keep_source: bool = False,
 ) -> dict[Path, tuple[bool, str]]:
-    """Run many encodes concurrently. `jobs` is a list of (src, song_dir)."""
+    """
+    Run many encodes concurrently. `jobs` is a list of (src, song_dir).
+
+    `keep_source` is forwarded to every job, which is what lets the preview
+    pass run here rather than in a serial loop of its own: a preview is the
+    same encode at a lower resolution that must not delete the source.
+    """
     workers = workers or default_workers()
     results: dict[Path, tuple[bool, str]] = {}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(encode_one, src, d, settings): d for src, d in jobs
+            pool.submit(encode_one, src, d, settings, keep_source): d
+            for src, d in jobs
         }
         for fut in as_completed(futures):
             song_dir = futures[fut]

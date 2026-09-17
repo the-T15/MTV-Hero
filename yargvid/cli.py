@@ -567,66 +567,88 @@ def cmd_encode(args, db: Database) -> None:
 
     # A measured-static background is album art for the whole song. Skipping
     # those leaves YARG's own venue in place, which many people prefer to a
-    # still image. They stay 'pending', so dropping the flag encodes them later
-    # without redoing anything.
-    if getattr(args, "skip_static", False):
+    # still image, and it is the default for that reason. They stay 'pending',
+    # so --include-static encodes them later without redoing anything.
+    if getattr(args, "skip_static", True):
         before = len(rows)
         rows = [r for r in rows if not enc.is_static(
             r["motion"] if r["motion"] is not None else -1.0)]
         skipped = before - len(rows)
         if skipped:
             print(f"Skipping {skipped} static backgrounds "
-                  f"(left pending; rerun without --skip-static to include them)")
+                  f"(left pending; rerun with --include-static to encode them)")
     settings = enc.EncodeSettings(
         height=args.height, crf=args.crf, cpu_used=args.cpu_used,
-        threads_per_job=args.threads,
+        threads_per_job=args.threads, bitrate_cap=args.bitrate_cap,
+        max_fps=args.max_fps,
     )
     workers = args.workers or enc.default_workers()
     print(f"{len(rows)} to encode, {workers} concurrent jobs x "
           f"{settings.threads_per_job} threads")
 
-    if args.preview:
+    preview = bool(getattr(args, "preview", False))
+    if preview:
         # A preview is the real encode at low resolution: full length, correct
         # timing, written as video.webm so YARG will actually load it. Sources
-        # are kept and the DB is left untouched, so the full-quality run
+        # are kept and encode_status stays pending, so the full-quality run
         # afterwards simply overwrites these.
-        preview_settings = replace(
-            settings, height=args.preview_height, cpu_used=5, bitrate_cap="800k"
+        settings = replace(
+            settings, height=args.preview_height, cpu_used=5,
+            bitrate_cap="800k",
         )
         print(f"Previewing {len(rows)} songs at {args.preview_height}p "
               f"(full length, sources kept)")
-        failed = 0
-        for row in rows:
-            d = Path(row["song_dir"])
-            # One bad song must never abort the batch. The parallel encode
-            # path already isolates failures; this loop needs the same.
-            try:
-                ok, err = enc.encode_one(
-                    Path(row["source_path"]), d, preview_settings, keep_source=True
-                )
-                if ok:
-                    write_video_start_time(d, int(round(row["offset_ms"] or 0)))
-            except Exception as exc:  # noqa: BLE001
-                ok, err = False, str(exc)[:200]
-            failed += not ok
-            print(f"  {'ok ' if ok else 'ERR'} {d.name} {err}")
-        if failed:
-            print(f"\n  {failed} of {len(rows)} failed - rerun to retry them")
-        print("\nWritten as video.webm at preview quality. Check sync in YARG,")
-        print("then re-run without --preview for the full-quality encode.")
-        return
 
     jobs = [(Path(r["source_path"]), Path(r["song_dir"])) for r in rows]
+    # The offsets come out of the rows already fetched. progress() runs once
+    # per finished job, and going back to the database for a number it was
+    # handed is one query per song for nothing.
+    offsets = {Path(r["song_dir"]): int(round(r["offset_ms"] or 0))
+               for r in rows}
     done = [0]
 
     def progress(song_dir, result):
         done[0] += 1
         ok, err = result
-        db.update(song_dir, encode_status="ok" if ok else "failed", encode_note=err)
+        if ok:
+            # video_start_time belongs to the encode that produced the file,
+            # not to a stage someone has to remember to run afterwards. A
+            # preview writes it too - checking sync is the whole point of one -
+            # but leaves encode_status pending so the full run still happens.
+            fields = dict(ini_status="ok")
+            try:
+                write_video_start_time(song_dir, offsets.get(Path(song_dir), 0))
+            except OSError as exc:
+                # This runs inside encode_many's result loop, which is inside
+                # the pool's `with` block: raising here does not cancel the
+                # queued jobs, it just stops anything from recording them -
+                # every remaining song would still encode and still lose its
+                # source with nothing written down. A song.ini locked by YARG
+                # or Explorer is common enough on Windows that encode.py
+                # retries the same class of lock on video.webm. The encode
+                # itself is on disk, so the row stays 'ok' and `ini` repairs
+                # the one file that could not be written.
+                fields = dict(ini_status="pending")
+                err = f"encoded, but song.ini could not be written: {exc}"
+            if not preview:
+                fields.update(encode_status="ok", encode_note=None)
+            db.update(song_dir, **fields)
+        elif not preview:
+            # A failed preview is not a failed encode. It leaves the row alone,
+            # so the full run still finds the song pending.
+            db.update(song_dir, encode_status="failed", encode_note=err)
         print(f"  [{done[0]}/{len(jobs)}] {'ok ' if ok else 'ERR'} "
               f"{Path(song_dir).name} {err}", flush=True)
 
-    enc.encode_many(jobs, settings, workers, on_done=progress)
+    results = enc.encode_many(jobs, settings, workers, on_done=progress,
+                              keep_source=preview)
+
+    if preview:
+        failed = sum(1 for ok, _ in results.values() if not ok)
+        if failed:
+            print(f"\n  {failed} of {len(rows)} failed - rerun to retry them")
+        print("\nWritten as video.webm at preview quality. Check sync in YARG,")
+        print("then re-run without --preview for the full-quality encode.")
 
 
 def cmd_ini(args, db: Database) -> None:
@@ -1655,11 +1677,18 @@ def main(argv=None) -> int:
     s.add_argument("--cpu-used", type=int, default=3)
     s.add_argument("--threads", type=int, default=2)
     s.add_argument("--workers", type=int, default=None)
+    s.add_argument("--bitrate-cap", default="4M",
+                   help="ceiling for constant-quality mode (default 4M)")
+    s.add_argument("--max-fps", type=float, default=30.0,
+                   help="cap the frame rate; slower sources keep their own")
     s.add_argument("--preview", action="store_true",
                    help="low-res full-length encode to check sync in YARG")
     s.add_argument("--preview-height", type=int, default=480)
-    s.add_argument("--skip-static", action="store_true",
-                   help="leave album-art backgrounds unencoded")
+    s.add_argument("--skip-static", action="store_true", default=True,
+                   help="leave album-art backgrounds unencoded (the default)")
+    s.add_argument("--include-static", action="store_false",
+                   dest="skip_static",
+                   help="encode album-art backgrounds too")
     s.add_argument("--skip-existing", action="store_true",
                    help="leave folders that already contain a video.webm")
     s.add_argument("--reviewed", action="store_true",
