@@ -5,6 +5,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-17
+
 ### Added
 - `encode --codec {vp8,h264,h264_nvenc,h264_amf,h264_qsv}`: a codec table in
   `encode.py` carries the encoder, its quality flags, the container and the
@@ -169,7 +171,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 - Dead code and stale text removed across the package; README documents
   every subcommand and flag.
 
-[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/the-T15/MTV-Hero/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/the-T15/MTV-Hero/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/the-T15/MTV-Hero/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/the-T15/MTV-Hero/compare/v0.2.0...v0.3.0
