@@ -85,6 +85,7 @@ yargvid match
 yargvid download
 yargvid sync
 yargvid review              # check the results
+yargvid estimate --reviewed # how much disk that run will take
 yargvid encode --reviewed
 ```
 
@@ -108,7 +109,8 @@ hours to the whole library.
 | `download` | fetch the winning video |
 | `sync` | measure and verify the offset |
 | `review` | watch proof clips and approve, defer, replace or drop |
-| `encode` | transcode to VP8/WebM |
+| `encode` | transcode to the background video YARG plays |
+| `estimate` | how much disk an `encode` run would take, before it starts |
 | `ini` | repair: write `video_start_time` for rows that encoded but whose `song.ini` is still pending |
 | `retry <stage>` | send a stage's failures back to pending (`--all` for every row) |
 
@@ -120,17 +122,67 @@ Stage flags worth knowing:
 | `--redo` | `match` | re-attempt only songs that previously failed |
 | `--recheck` | `sync` | recompute already-synced songs and write only what changed |
 | `--songs F` | `match`, `sync` | run only the song folders listed in file `F`, one per line |
+| `--codec C` | `encode`, `estimate` | `vp8` (the default), `h264`, or a hardware row |
+| `--crf N` | `encode`, `estimate` | quality number; the codec's own default if unset |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
-| `--bitrate-cap C` | `encode` | ceiling for constant-quality mode (default `4M`) |
-| `--max-fps N` | `encode` | cap the frame rate (default 30); slower sources keep their own |
-| `--skip-static` | `encode` | leave album-art backgrounds unencoded (the default) |
-| `--include-static` | `encode` | encode album-art backgrounds too |
-| `--skip-existing` | `encode` | leave folders that already hold a `video.webm` |
-| `--reviewed` | `encode` | only songs you approved by eye |
+| `--bitrate-cap C` | `encode`, `estimate` | ceiling for constant-quality mode (default `4M`) |
+| `--max-fps N` | `encode`, `estimate` | cap the frame rate (default 30); slower sources keep their own |
+| `--fps N` | `encode`, `estimate` | force this frame rate, whatever the source runs at |
+| `--size-lock B` | `encode`, `estimate` | two-pass target bitrate: exact size, quality varies. Not with `--crf` |
+| `--skip-static` | `encode`, `estimate` | leave album-art backgrounds unencoded (the default) |
+| `--include-static` | `encode`, `estimate` | encode album-art backgrounds too |
+| `--skip-existing` | `encode`, `estimate` | leave folders that already hold a video |
+| `--reviewed` | `encode`, `estimate` | only songs you approved by eye |
 | `--mark` | `videos` | record which songs already had a video, for review |
 | `--force` | `export` | overwrite the output CSV (it refuses by default) |
 
-`--cookies` and `--sleep` apply to `match`, `download` and `check`.
+`--cookies` and `--sleep` apply to `match`, `download` and `check`. Every
+`encode` flag is also an `estimate` flag: `estimate` predicts the run that the
+same command line would do, so it has to be able to describe the same run.
+
+### Codecs
+
+`--codec` picks a row of the table in `encode.py`.
+
+| codec | encoder | container | notes |
+|---|---|---|---|
+| `vp8` | libvpx | WebM | the default, and the only one confirmed to play in YARG on every platform |
+| `h264` | libx264 | MP4 | much faster than libvpx at the same picture |
+| `h264_nvenc` | NVIDIA | MP4 | fastest by a wide margin; needs an NVIDIA GPU |
+| `h264_amf` | AMD | MP4 | written but never run by this project |
+| `h264_qsv` | Intel Quick Sync | MP4 | written but never run by this project |
+
+`yargvid doctor` reports each hardware row as `[ok]` or `[absent]`. It asks the
+encoder to encode one frame rather than trusting `ffmpeg -encoders`, because
+a build compiled with NVENC still lists it on a machine with no NVIDIA card.
+A hardware encoder that fails either check falls back to `h264` with a printed
+line, so a run never quietly takes the software path.
+
+A song folder holds at most one video: YARG can select the wrong file when
+there are two (YARG issue #1331). So a successful encode deletes the other
+codec's output as well as the downloaded source.
+
+### How big will it be
+
+For example — the figures depend on your library and on the sample drawn, so
+run it rather than reading them off here:
+
+```
+yargvid estimate --reviewed
+1391 songs to encode, 78.4 hours of video at vp8 1080p
+Measuring 3 songs at these settings (nothing is written to the library)...
+~ 41.20 GB (max 141.12 GB)
+```
+
+The maximum is arithmetic: the bitrate ceiling times the running time, the
+size if every song spent every bit it is allowed. The estimate is a
+measurement - three songs drawn at random from the run, encoded at those exact
+settings into a temporary folder, their bits per second applied to the rest.
+Constant-quality encoding spends what the picture needs, which is usually well
+under the ceiling, so the ceiling on its own is not an answer.
+
+`--size-lock 2500k` makes the two numbers the same: the target bitrate is the
+size, and what varies is the quality of the songs that needed more.
 
 ### Diagnostics
 

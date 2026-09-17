@@ -356,7 +356,10 @@ def drop_song(db: Database, song: Path) -> None:
     ).fetchone()
     if row and row["source_path"]:
         Path(row["source_path"]).unlink(missing_ok=True)
-    for leftover in list(song.glob("video.webm")) + list(song.glob("video.src.*")):
+    # Whichever codec wrote it, and whatever the source arrived as.
+    for name in enc.OUTPUT_NAMES:
+        (song / name).unlink(missing_ok=True)
+    for leftover in song.glob("video.src.*"):
         leftover.unlink(missing_ok=True)
     # 'skipped' is not 'ok', so no later stage will queue it again.
     db.update(song, match_status="skipped",
@@ -373,12 +376,11 @@ def drop_song(db: Database, song: Path) -> None:
 # ------------------------------------------------------------------ clip ----
 
 def source_video(row) -> Path | None:
-    """The downloaded source if still present, else the encoded webm."""
+    """The downloaded source if still present, else the encoded output."""
     src = row["source_path"]
     if src and Path(src).exists():
         return Path(src)
-    webm = Path(row["song_dir"]) / "video.webm"
-    return webm if webm.exists() else None
+    return enc.find_output(Path(row["song_dir"]))
 
 
 def _sha8(text: str) -> str:

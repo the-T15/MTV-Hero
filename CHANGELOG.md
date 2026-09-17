@@ -5,6 +5,42 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+### Added
+- `encode --codec {vp8,h264,h264_nvenc,h264_amf,h264_qsv}`: a codec table in
+  `encode.py` carries the encoder, its quality flags, the container and the
+  preview override for each row. The default stays `vp8`, the only codec
+  confirmed to play in YARG on every platform.
+- `encode --fps N` forces a frame rate, distinct from `--max-fps`, which only
+  caps one. Given both, `--fps` wins.
+- `encode --size-lock B`: two-pass target bitrate. Exact size, quality varies
+  per song. Refused together with `--crf`, which asks for the opposite.
+- `yargvid estimate`: what an encode run would cost in disk space, before it
+  starts. Takes every `encode` flag, so it describes the same run. Prints
+  `~ N GB (max M GB)` - the maximum from the bitrate ceiling, the estimate
+  from a three-song sample encoded into a temporary folder. Writes nothing.
+- `doctor` reports each hardware encoder as `[ok]` or `[absent]`, having asked
+  it to encode a frame rather than trusting `ffmpeg -encoders`. A missing one
+  is not a missing tool; `h264_amf` and `h264_qsv` are labelled untested.
+
+### Changed
+- `encode --crf` defaults to the codec row's own number (31 for vp8, 23 for
+  the H.264 rows) instead of a hardcoded 31.
+- One helper names the output file. `encode`, `videos`, `--skip-existing` and
+  the review app all ask `encode.find_output` which video a folder holds,
+  rather than each testing for `video.webm`.
+- A hardware encoder is resolved once per run, not once per song, and a
+  fallback to software prints a line rather than happening quietly.
+
+### Fixed
+- A successful encode now deletes the other codec's output from the folder.
+  YARG can select the wrong file when a folder holds two videos (YARG #1331),
+  and unlike a leftover source file the other codec's output is a real,
+  playable video - so switching codec looked like it had no effect.
+- `encode --limit N` applied its limit in SQL, before `--skip-existing`,
+  `--reviewed` and the static-background filter ran in Python, so a run could
+  encode far fewer than N songs and still report a full batch. The limit is
+  now applied last, to the songs that are actually going to be encoded.
+
 ## [0.5.0] — 2026-09-17
 
 ### Added

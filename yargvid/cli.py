@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import os
+import random
 import re
 import shutil
 import sys
@@ -544,17 +545,28 @@ def cmd_sync(args, db: Database) -> None:
             print("Those were sent back for review; run: yargvid review")
 
 
-def cmd_encode(args, db: Database) -> None:
-    rows = db.pending("encode", args.limit, getattr(args, "sample", False))
+def encode_rows(args, db: Database) -> list:
+    """
+    The rows an `encode` run would touch, after every filter, in run order.
+
+    `--limit` is applied here rather than in SQL. `db.pending` puts its LIMIT
+    in the query, which runs before any of the filters below, so `--limit 100`
+    across a stretch of static backgrounds could encode almost nothing and
+    still report itself as a full batch. Slicing last means the limit counts
+    songs that are actually going to be encoded.
+
+    `estimate` calls this too. An estimate of a different set of songs from
+    the one the run would do is not an estimate of the run.
+    """
+    rows = db.pending("encode", None, getattr(args, "sample", False))
 
     if getattr(args, "skip_existing", False):
         before = len(rows)
         rows = [r for r in rows
-                if not (Path(r["song_dir"]) / "video.webm").exists()]
+                if enc.find_output(Path(r["song_dir"])) is None]
         kept = before - len(rows)
         if kept:
-            print(f"Leaving {kept} folders alone - they already have a "
-                  f"video.webm")
+            print(f"Leaving {kept} folders alone - they already hold a video")
 
     # Encoding is the slow, destructive step - it deletes source videos. Being
     # able to run it over only what you have signed off keeps the unreviewed
@@ -562,7 +574,7 @@ def cmd_encode(args, db: Database) -> None:
     if getattr(args, "reviewed", False):
         before = len(rows)
         rows = [r for r in rows if r["review"] == "keep"]
-        print(f"Encoding {len(rows)} approved songs "
+        print(f"{len(rows)} approved songs "
               f"({before - len(rows)} not yet approved, left alone)")
 
     # A measured-static background is album art for the whole song. Skipping
@@ -577,25 +589,45 @@ def cmd_encode(args, db: Database) -> None:
         if skipped:
             print(f"Skipping {skipped} static backgrounds "
                   f"(left pending; rerun with --include-static to encode them)")
+
+    limit = getattr(args, "limit", None)
+    return rows[:int(limit)] if limit else rows
+
+
+def encode_settings(args) -> enc.EncodeSettings:
+    """The settings one `encode` or `estimate` run uses, preview included."""
     settings = enc.EncodeSettings(
         height=args.height, crf=args.crf, cpu_used=args.cpu_used,
         threads_per_job=args.threads, bitrate_cap=args.bitrate_cap,
-        max_fps=args.max_fps,
+        max_fps=args.max_fps, codec=getattr(args, "codec", "vp8"),
+        fps=getattr(args, "fps", None),
+        size_lock=getattr(args, "size_lock", None),
     )
+    if getattr(args, "preview", False):
+        # A preview is the real encode at low resolution: full length, correct
+        # timing, under the real filename so YARG will actually load it.
+        # Sources are kept and encode_status stays pending, so the
+        # full-quality run afterwards simply overwrites these. What "faster
+        # and smaller" means is the codec's business, so the row says.
+        settings = replace(settings, height=args.preview_height,
+                           **enc.codec_of(settings).preview)
+    return settings
+
+
+def cmd_encode(args, db: Database) -> None:
+    rows = encode_rows(args, db)
+
+    # Once per run, not once per song. Whether this machine has a working
+    # NVENC is a property of the machine, and a run that quietly took the
+    # software path has to say so - otherwise its timings mean something
+    # other than what they look like.
+    settings = enc.resolve_codec(encode_settings(args))
     workers = args.workers or enc.default_workers()
     print(f"{len(rows)} to encode, {workers} concurrent jobs x "
           f"{settings.threads_per_job} threads")
 
     preview = bool(getattr(args, "preview", False))
     if preview:
-        # A preview is the real encode at low resolution: full length, correct
-        # timing, written as video.webm so YARG will actually load it. Sources
-        # are kept and encode_status stays pending, so the full-quality run
-        # afterwards simply overwrites these.
-        settings = replace(
-            settings, height=args.preview_height, cpu_used=5,
-            bitrate_cap="800k",
-        )
         print(f"Previewing {len(rows)} songs at {args.preview_height}p "
               f"(full length, sources kept)")
 
@@ -625,7 +657,7 @@ def cmd_encode(args, db: Database) -> None:
                 # every remaining song would still encode and still lose its
                 # source with nothing written down. A song.ini locked by YARG
                 # or Explorer is common enough on Windows that encode.py
-                # retries the same class of lock on video.webm. The encode
+                # retries the same class of lock on the output. The encode
                 # itself is on disk, so the row stays 'ok' and `ini` repairs
                 # the one file that could not be written.
                 fields = dict(ini_status="pending")
@@ -647,8 +679,70 @@ def cmd_encode(args, db: Database) -> None:
         failed = sum(1 for ok, _ in results.values() if not ok)
         if failed:
             print(f"\n  {failed} of {len(rows)} failed - rerun to retry them")
-        print("\nWritten as video.webm at preview quality. Check sync in YARG,")
+        print(f"\nWritten as {enc.output_name(settings)} at preview quality. "
+              f"Check sync in YARG,")
         print("then re-run without --preview for the full-quality encode.")
+
+
+def cmd_estimate(args, db: Database) -> None:
+    """
+    What the encode run `encode` would start is going to cost in disk space.
+
+    Two numbers, because they answer two questions. The maximum is
+    arithmetic: the bitrate ceiling times the running time, the size if every
+    song spent every bit it is allowed. The estimate is a measurement - a
+    three-song sample encoded at these exact settings into a temporary folder,
+    its bits per second applied to the whole run. Constant-quality encoding
+    spends what the picture needs, which is usually far under the ceiling, so
+    the two are not close and the ceiling alone is not an answer.
+
+    Writes nothing: not to the database, not into a song folder.
+    """
+    rows = encode_rows(args, db)
+    settings = enc.resolve_codec(encode_settings(args))
+
+    measured = [r for r in rows if r["video_seconds"]]
+    seconds = sum(float(r["video_seconds"]) for r in measured)
+    print(f"{len(rows)} songs to encode, {seconds / 3600:.1f} hours of video "
+          f"at {settings.codec} {settings.height}p")
+    if len(rows) > len(measured):
+        print(f"{len(rows) - len(measured)} of them have no measured length "
+              f"and are not counted - run: yargvid videos --lengths")
+
+    try:
+        if settings.size_lock:
+            # Under a size lock the target bitrate IS the size. Nothing to
+            # sample: that is the whole point of the mode.
+            rate = cap = float(enc.parse_bitrate(settings.size_lock))
+        else:
+            cap = float(enc.parse_bitrate(settings.bitrate_cap))
+            rate = None
+    except ValueError as exc:
+        print(f"Cannot read that bitrate: {exc}")
+        print("Give it as bits per second, or with k or M: 800k, 2500k, 4M.")
+        return
+
+    if rate is None:
+        key = enc.rate_key(settings)
+        if key not in enc.RATE_TABLE and measured:
+            sample = random.sample(measured, min(3, len(measured)))
+            print(f"Measuring {len(sample)} songs at these settings "
+                  f"(nothing is written to the library)...")
+            bps = enc.measure_rate(
+                sample, settings, args.workers or enc.default_workers())
+            # A sample where every encode failed measures zero bits per
+            # second, which is not a small estimate - it is no estimate. Cached
+            # it would report this run as free for the rest of the session.
+            if bps > 0:
+                enc.RATE_TABLE[key] = bps
+            else:
+                print("The sample encodes produced nothing; "
+                      "showing the ceiling only.")
+        # With nothing measured the honest estimate is the ceiling.
+        rate = enc.RATE_TABLE.get(key, cap)
+
+    gb = seconds / 8 / 1e9
+    print(f"~ {rate * gb:.2f} GB (max {cap * gb:.2f} GB)")
 
 
 def cmd_ini(args, db: Database) -> None:
@@ -1450,8 +1544,8 @@ def cmd_videos(args, db: Database) -> None:
     Which song folders already hold a video, and where each one came from.
 
     Files on disk and the database can disagree in two different ways, and the
-    difference matters. A preview writes a real video.webm without marking the
-    song encoded. A file left by an earlier project is invisible to this
+    difference matters. A preview writes a real video file without marking
+    the song encoded. A file left by an earlier project is invisible to this
     pipeline but very much visible to YARG, which has been playing it with
     whatever offset produced it. Encoding overwrites both.
     """
@@ -1478,9 +1572,9 @@ def cmd_videos(args, db: Database) -> None:
 
     for r in rows:
         d = Path(r["song_dir"])
-        webm = d / "video.webm"
-        if webm.exists():
-            entry = (r, webm.stat().st_size / 1_048_576)
+        made = enc.find_output(d)
+        if made is not None:
+            entry = (r, made.stat().st_size / 1_048_576)
             if r["encode_status"] == "ok":
                 encoded.append(entry)
             elif r["sync_status"] in ("ok", "drift", "unverified"):
@@ -1498,7 +1592,7 @@ def cmd_videos(args, db: Database) -> None:
     groups = (("encoded", encoded), ("preview", previews),
               ("pre-existing", foreign))
     total = sum(s for _, g in groups for _, s in g)
-    print(f"{sum(len(g) for _, g in groups)} song folders contain video.webm "
+    print(f"{sum(len(g) for _, g in groups)} song folders contain a video "
           f"({total / 1024:.2f} GB)")
     print(f"  {len(encoded):>5} encoded by this pipeline")
     print(f"  {len(previews):>5} previews - synced here, not encoded yet")
@@ -1601,6 +1695,46 @@ def cmd_retry(args, db: Database) -> None:
 JS_RUNTIMES = ("deno", "node", "bun")
 
 
+def add_encode_flags(s) -> None:
+    """
+    Every flag that describes an encode run.
+
+    `encode` does the run and `estimate` predicts it, so they take the same
+    flags by construction rather than by two lists kept in step by hand.
+    """
+    s.add_argument("--codec", choices=list(enc.CODECS), default="vp8",
+                   help="output codec (default vp8: the only one YARG is "
+                        "known to play on every platform)")
+    s.add_argument("--height", type=int, default=1080)
+    s.add_argument("--crf", type=int, default=None,
+                   help="quality number; default is the codec's own "
+                        "(31 for vp8, 23 for the h264 rows)")
+    s.add_argument("--cpu-used", type=int, default=3)
+    s.add_argument("--threads", type=int, default=2)
+    s.add_argument("--workers", type=int, default=None)
+    s.add_argument("--bitrate-cap", default="4M",
+                   help="ceiling for constant-quality mode (default 4M)")
+    s.add_argument("--max-fps", type=float, default=30.0,
+                   help="cap the frame rate; slower sources keep their own")
+    s.add_argument("--fps", type=float, default=None,
+                   help="force this frame rate, whatever the source runs at")
+    s.add_argument("--size-lock", default=None,
+                   help="two-pass target bitrate (e.g. 2500k): exact size, "
+                        "quality varies per song. Not with --crf")
+    s.add_argument("--preview", action="store_true",
+                   help="low-res full-length encode to check sync in YARG")
+    s.add_argument("--preview-height", type=int, default=480)
+    s.add_argument("--skip-static", action="store_true", default=True,
+                   help="leave album-art backgrounds unencoded (the default)")
+    s.add_argument("--include-static", action="store_false",
+                   dest="skip_static",
+                   help="encode album-art backgrounds too")
+    s.add_argument("--skip-existing", action="store_true",
+                   help="leave folders that already contain a video")
+    s.add_argument("--reviewed", action="store_true",
+                   help="only encode songs marked \u2018Looks right\u2019")
+
+
 def cmd_doctor(args, db: Database) -> None:
     # Without a JavaScript runtime yt-dlp cannot solve YouTube's signature
     # challenges, and the response comes back with every audio and video
@@ -1619,6 +1753,20 @@ def cmd_doctor(args, db: Database) -> None:
         print(f"  [{'ok' if ok else 'MISSING'}] {name}")
     if not all(ok for _, ok in checks):
         print("\nInstall the missing tools before running the pipeline.")
+
+    # Hardware encoders are an optimisation, not a requirement: every one of
+    # them falls back to libx264, which is always there. So they are reported
+    # separately and a missing one is never counted as a missing tool.
+    # Listing an encoder proves only that the build was compiled with it, so
+    # each of these has actually been asked to encode a frame.
+    print("\n  Hardware encoders (optional - each falls back to software):")
+    for name, codec in enc.CODECS.items():
+        if not codec.hardware:
+            continue
+        ok, why = enc.check_encoder(codec.encoder)
+        note = "" if ok else f" - {why}"
+        tag = " (untested by this project)" if name in enc.UNTESTED else ""
+        print(f"  [{'ok' if ok else 'absent'}] {name}{note}{tag}")
 
 
 # -------------------------------------------------------------------- main ---
@@ -1671,29 +1819,15 @@ def main(argv=None) -> int:
                         "file, one per line, under the --recheck rules")
     s.set_defaults(fn=cmd_sync)
 
-    s = sub.add_parser("encode", help="transcode to VP8 webm")
-    s.add_argument("--height", type=int, default=1080)
-    s.add_argument("--crf", type=int, default=31)
-    s.add_argument("--cpu-used", type=int, default=3)
-    s.add_argument("--threads", type=int, default=2)
-    s.add_argument("--workers", type=int, default=None)
-    s.add_argument("--bitrate-cap", default="4M",
-                   help="ceiling for constant-quality mode (default 4M)")
-    s.add_argument("--max-fps", type=float, default=30.0,
-                   help="cap the frame rate; slower sources keep their own")
-    s.add_argument("--preview", action="store_true",
-                   help="low-res full-length encode to check sync in YARG")
-    s.add_argument("--preview-height", type=int, default=480)
-    s.add_argument("--skip-static", action="store_true", default=True,
-                   help="leave album-art backgrounds unencoded (the default)")
-    s.add_argument("--include-static", action="store_false",
-                   dest="skip_static",
-                   help="encode album-art backgrounds too")
-    s.add_argument("--skip-existing", action="store_true",
-                   help="leave folders that already contain a video.webm")
-    s.add_argument("--reviewed", action="store_true",
-                   help="only encode songs marked \u2018Looks right\u2019")
-    s.set_defaults(fn=cmd_encode)
+    s = sub.add_parser("encode", help="transcode to a background video")
+    add_encode_flags(s); s.set_defaults(fn=cmd_encode)
+
+    # `estimate` answers a question about an encode run, so it has to be able
+    # to describe the same run - every flag that changes which songs are
+    # encoded, or how big each one comes out.
+    s = sub.add_parser("estimate",
+                       help="how much disk an encode run would take")
+    add_encode_flags(s); s.set_defaults(fn=cmd_estimate)
 
     s = sub.add_parser("ini", help="write video_start_time"); s.set_defaults(fn=cmd_ini)
     s = sub.add_parser("diagnose", help="debug one song's match, verbosely")
@@ -1789,6 +1923,14 @@ def main(argv=None) -> int:
     s.add_argument("--all", action="store_true"); s.set_defaults(fn=cmd_retry)
 
     args = p.parse_args(argv)
+
+    # One sets the bitrate and lets the quality fall where it may; the other
+    # sets the quality and lets the bitrate. Given both, the second silently
+    # wins and the run is not the one that was asked for.
+    locked = getattr(args, "size_lock", None)
+    if locked and getattr(args, "crf", None) is not None:
+        p.error("--size-lock fixes the bitrate and --crf fixes the quality; "
+                "use one or the other")
 
     # `doctor` checks the tools installed on this machine and has nothing to
     # ask a database. Opening one CREATES it, so the command whose whole job
