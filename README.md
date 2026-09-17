@@ -128,7 +128,7 @@ Stage flags worth knowing:
 | `--bitrate-cap C` | `encode`, `estimate` | ceiling for constant-quality mode (default `4M`) |
 | `--max-fps N` | `encode`, `estimate` | cap the frame rate (default 30); slower sources keep their own |
 | `--fps N` | `encode`, `estimate` | force this frame rate, whatever the source runs at |
-| `--size-lock B` | `encode`, `estimate` | two-pass target bitrate: exact size, quality varies. Not with `--crf` |
+| `--size-lock B` | `encode`, `estimate` | target bitrate: predictable size, quality varies. Two passes on `vp8`/`h264`, one on a hardware codec. Not with `--crf` |
 | `--skip-static` | `encode`, `estimate` | leave album-art backgrounds unencoded (the default) |
 | `--include-static` | `encode`, `estimate` | encode album-art backgrounds too |
 | `--skip-existing` | `encode`, `estimate` | leave folders that already hold a video |
@@ -146,11 +146,17 @@ same command line would do, so it has to be able to describe the same run.
 
 | codec | encoder | container | notes |
 |---|---|---|---|
-| `vp8` | libvpx | WebM | the default, and the only one confirmed to play in YARG on every platform |
-| `h264` | libx264 | MP4 | much faster than libvpx at the same picture |
+| `vp8` | libvpx | WebM | the default, and the only one confirmed to play in YARG |
+| `h264` | libx264 | MP4 | much faster than libvpx at the same picture — **not yet confirmed in YARG** |
 | `h264_nvenc` | NVIDIA | MP4 | fastest by a wide margin; needs an NVIDIA GPU |
 | `h264_amf` | AMD | MP4 | written but never run by this project |
 | `h264_qsv` | Intel Quick Sync | MP4 | written but never run by this project |
+
+> **Use `vp8` unless you have checked otherwise.** The H.264 rows produce
+> valid, playable mp4 files, but no file from them has been loaded in YARG
+> yet. A full `encode` run deletes every source video, so a codec your YARG
+> build will not load cannot be undone without re-downloading the library.
+> Try one song with `--preview` first — a preview keeps the source.
 
 `yargvid doctor` reports each hardware row as `[ok]` or `[absent]`. It asks the
 encoder to encode one frame rather than trusting `ffmpeg -encoders`, because
@@ -159,8 +165,11 @@ A hardware encoder that fails either check falls back to `h264` with a printed
 line, so a run never quietly takes the software path.
 
 A song folder holds at most one video: YARG can select the wrong file when
-there are two (YARG issue #1331). So a successful encode deletes the other
-codec's output as well as the downloaded source.
+there are two (YARG issue #1331). So a successful encode deletes the downloaded
+source and any other video file in the folder — a `video.mp4` when it writes
+`video.webm`, and the other way round. It cannot tell one of its own files
+from one that predates this project, and a `--preview` deletes them too, so
+`videos --mark` before your first encode if you want to know what was there.
 
 ### How big will it be
 
@@ -169,8 +178,10 @@ run it rather than reading them off here:
 
 ```
 yargvid estimate --reviewed
+1391 approved songs (32 not yet approved, left alone)
 1391 songs to encode, 78.4 hours of video at vp8 1080p
-Measuring 3 songs at these settings (nothing is written to the library)...
+Measuring 3 songs at these settings, which takes as long as encoding them.
+  Nothing is written to the library: Blur - Song 2, Muse - Hysteria, a-ha - Take On Me
 ~ 41.20 GB (max 141.12 GB)
 ```
 
@@ -182,7 +193,10 @@ Constant-quality encoding spends what the picture needs, which is usually well
 under the ceiling, so the ceiling on its own is not an answer.
 
 `--size-lock 2500k` makes the two numbers the same: the target bitrate is the
-size, and what varies is the quality of the songs that needed more.
+size, and what varies is the quality of the songs that needed more. On `vp8`
+and `h264` that is a two-pass encode and lands within about 1% of the target.
+The hardware codecs do it in one pass, so treat their figure as a target
+rather than a promise — measured overshoot on `h264_nvenc` was 5-15%.
 
 ### Diagnostics
 

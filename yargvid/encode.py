@@ -110,7 +110,7 @@ CODECS: dict[str, Codec] = {
     ),
     "h264_amf": Codec(
         encoder="h264_amf",
-        quality_flags=("-qp_i", "-qp_p"),
+        quality_flags=("-qp_i", "-qp_p", "-qp_b"),
         crf=23,
         container="mp4",
         extension=".mp4",
@@ -181,16 +181,39 @@ def find_output(song_dir: Path) -> Path | None:
     return None
 
 
+# What ffmpeg's own number parser does with a trailing letter. Only these
+# four are SI prefixes to it, and the case matters in one place that costs
+# you the whole encode - see parse_bitrate.
+BITRATE_SUFFIXES = {"k": 1_000, "K": 1_000, "M": 1_000_000, "G": 1_000_000_000}
+
+
 def parse_bitrate(text: str) -> int:
-    """`4M` -> 4000000. Raises ValueError on anything that is not a rate."""
+    """
+    `4M` -> 4000000, reading the suffix exactly as ffmpeg reads it.
+
+    ffmpeg's expression parser takes SI prefixes, and in SI a lowercase `m`
+    is MILLI. `-b:v 4m` is therefore four thousandths of a bit per second,
+    which truncates to zero - and `-b:v 0` on libvpx is the documented trap
+    in NOTES that silently encodes the library at a fraction of the intended
+    bitrate. Measured: `-b:v 4m` and `-b:v 0` produce byte-identical output.
+    A lowercase `g` is not a prefix to ffmpeg at all and is simply refused.
+
+    So this rejects both rather than guessing what was meant. The settings
+    carry the string the user typed all the way to the command line, so a
+    parser that is more generous than ffmpeg is a parser that approves a
+    command line ffmpeg will read differently.
+    """
     s = str(text).strip()
     mult = 1
-    if s[-1:] in ("k", "K"):
-        mult, s = 1_000, s[:-1]
-    elif s[-1:] in ("m", "M"):
-        mult, s = 1_000_000, s[:-1]
-    elif s[-1:] in ("g", "G"):
-        mult, s = 1_000_000_000, s[:-1]
+    suffix = s[-1:]
+    if suffix in ("m", "g"):
+        reads = "milli, not mega" if suffix == "m" else "not a prefix at all"
+        raise ValueError(
+            f"{text!r}: ffmpeg reads a lowercase {suffix!r} as {reads} - "
+            f"write {s[:-1]}{suffix.upper()}"
+        )
+    if suffix in BITRATE_SUFFIXES:
+        mult, s = BITRATE_SUFFIXES[suffix], s[:-1]
     try:
         return int(float(s) * mult)
     except ValueError:
@@ -379,6 +402,28 @@ def _replace_with_retry(tmp: Path, dst: Path, attempts: int = 6) -> str:
     return ""
 
 
+def _remove_with_retry(path: Path, attempts: int = 6) -> str:
+    """Delete a file, tolerating the same transient locks as a replace."""
+    delay = 0.5
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return ""
+        except PermissionError:
+            if attempt == attempts - 1:
+                return (
+                    f"encoded, but {path.name} is still in the folder and "
+                    f"locked by another process - YARG loads the wrong file "
+                    f"when a folder holds two videos, so close YARG and any "
+                    f"video player and run this song again"
+                )
+            time.sleep(delay)
+            delay *= 2
+        except OSError as exc:
+            return f"encoded, but could not remove {path.name}: {exc}"
+    return ""
+
+
 def encode_one(
     src: Path,
     song_dir: Path,
@@ -439,10 +484,18 @@ def encode_one(
     # next to the new one, which is exactly that failure - and unlike a stray
     # source file it is a real, playable video, so it looks like the encode
     # simply had no effect.
+    #
+    # `missing_ok` covers a file that is not there; it does not cover one that
+    # is there and locked, which on Windows is the common case - YARG playing
+    # the old background is the very thing that leaves it open. Raising here
+    # would report a song whose new video is already on disk as a failed
+    # encode, so retry the way replacing the output does.
     for name in OUTPUT_NAMES:
         other = song_dir / name
         if other != dst:
-            other.unlink(missing_ok=True)
+            err = _remove_with_retry(other)
+            if err:
+                return False, err
 
     # Critical: a stray source file in the folder can shadow the output.
     if not keep_source and src.parent == song_dir:
@@ -566,7 +619,13 @@ def measure_rate(rows, settings: EncodeSettings,
     half-quality files in the library would be worse than no estimate.
     """
     rows = list(rows)
-    with tempfile.TemporaryDirectory(prefix="yargvid-estimate-") as tmp:
+    # mkdtemp rather than TemporaryDirectory: its cleanup raises, and a
+    # scanner still holding a file it has just seen written would turn a
+    # finished measurement into a traceback after the work was done.
+    # `ignore_cleanup_errors` would say this, but it is Python 3.10 and this
+    # package declares 3.9.
+    tmp = tempfile.mkdtemp(prefix="yargvid-estimate-")
+    try:
         root = Path(tmp)
         jobs, seconds = [], {}
         for i, r in enumerate(rows):
@@ -592,6 +651,9 @@ def measure_rate(rows, settings: EncodeSettings,
                 continue
             total_bytes += written.stat().st_size
             total_seconds += seconds.get(out, 0.0)
+
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     if total_seconds <= 0:
         return 0.0

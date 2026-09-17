@@ -12,8 +12,10 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
   confirmed to play in YARG on every platform.
 - `encode --fps N` forces a frame rate, distinct from `--max-fps`, which only
   caps one. Given both, `--fps` wins.
-- `encode --size-lock B`: two-pass target bitrate. Exact size, quality varies
-  per song. Refused together with `--crf`, which asks for the opposite.
+- `encode --size-lock B`: target bitrate, so the size is predictable and the
+  quality varies per song. Two passes on `vp8` and `h264`, which land within
+  about 1% of the target; one pass on the hardware codecs, which overshoot.
+  Refused together with `--crf`, which asks for the opposite.
 - `yargvid estimate`: what an encode run would cost in disk space, before it
   starts. Takes every `encode` flag, so it describes the same run. Prints
   `~ N GB (max M GB)` - the maximum from the bitrate ceiling, the estimate
@@ -32,6 +34,12 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
   fallback to software prints a line rather than happening quietly.
 
 ### Fixed
+- `--bitrate-cap` and `--size-lock` are now validated, and a lowercase `m` or
+  `g` is refused with the reason. ffmpeg reads SI prefixes, so `-b:v 4m` is
+  four thousandths of a bit per second: it truncates to zero and produces
+  byte-identical output to `-b:v 0`, the VP8 trap NOTES has recorded since the
+  beginning. `encode --bitrate-cap 4m` silently encoded the library at a sixth
+  of the intended bitrate, and the sources are deleted as it goes.
 - A successful encode now deletes the other codec's output from the folder.
   YARG can select the wrong file when a folder holds two videos (YARG #1331),
   and unlike a leftover source file the other codec's output is a real,

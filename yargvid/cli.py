@@ -719,15 +719,18 @@ def cmd_estimate(args, db: Database) -> None:
             rate = None
     except ValueError as exc:
         print(f"Cannot read that bitrate: {exc}")
-        print("Give it as bits per second, or with k or M: 800k, 2500k, 4M.")
         return
 
     if rate is None:
         key = enc.rate_key(settings)
         if key not in enc.RATE_TABLE and measured:
             sample = random.sample(measured, min(3, len(measured)))
-            print(f"Measuring {len(sample)} songs at these settings "
-                  f"(nothing is written to the library)...")
+            # This encodes them for real, so it takes as long as encoding
+            # them - say so, because there is no progress until it returns.
+            names = ", ".join(Path(r["song_dir"]).name for r in sample)
+            print(f"Measuring {len(sample)} songs at these settings, which "
+                  f"takes as long as encoding them.")
+            print(f"  Nothing is written to the library: {names}")
             bps = enc.measure_rate(
                 sample, settings, args.workers or enc.default_workers())
             # A sample where every encode failed measures zero bits per
@@ -1695,6 +1698,23 @@ def cmd_retry(args, db: Database) -> None:
 JS_RUNTIMES = ("deno", "node", "bun")
 
 
+def bitrate(text: str) -> str:
+    """
+    An argparse type that checks a bitrate and returns it unchanged.
+
+    The string goes to ffmpeg verbatim, so it has to be checked at the one
+    place both `encode` and `estimate` pass through. Checking it only where
+    it is read as a number would leave `encode --bitrate-cap 4m` encoding the
+    whole library at a sixth of the intended rate while `estimate` refused
+    the same word.
+    """
+    try:
+        enc.parse_bitrate(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    return text
+
+
 def add_encode_flags(s) -> None:
     """
     Every flag that describes an encode run.
@@ -1712,15 +1732,16 @@ def add_encode_flags(s) -> None:
     s.add_argument("--cpu-used", type=int, default=3)
     s.add_argument("--threads", type=int, default=2)
     s.add_argument("--workers", type=int, default=None)
-    s.add_argument("--bitrate-cap", default="4M",
+    s.add_argument("--bitrate-cap", default="4M", type=bitrate,
                    help="ceiling for constant-quality mode (default 4M)")
     s.add_argument("--max-fps", type=float, default=30.0,
                    help="cap the frame rate; slower sources keep their own")
     s.add_argument("--fps", type=float, default=None,
                    help="force this frame rate, whatever the source runs at")
-    s.add_argument("--size-lock", default=None,
-                   help="two-pass target bitrate (e.g. 2500k): exact size, "
-                        "quality varies per song. Not with --crf")
+    s.add_argument("--size-lock", default=None, type=bitrate,
+                   help="target bitrate (e.g. 2500k): exact size, quality "
+                        "varies per song. Two passes on a software codec, "
+                        "one on a hardware one. Not with --crf")
     s.add_argument("--preview", action="store_true",
                    help="low-res full-length encode to check sync in YARG")
     s.add_argument("--preview-height", type=int, default=480)
