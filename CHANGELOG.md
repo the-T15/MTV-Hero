@@ -5,6 +5,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-17
+
 ### Added
 - `encode --bitrate-cap` (default `4M`) and `encode --max-fps` (default 30):
   the two settings `cmd_encode` never passed are now flags.
@@ -115,7 +117,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 - Dead code and stale text removed across the package; README documents
   every subcommand and flag.
 
-[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/the-T15/MTV-Hero/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/the-T15/MTV-Hero/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/the-T15/MTV-Hero/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/the-T15/MTV-Hero/compare/v0.1.0...v0.2.0
