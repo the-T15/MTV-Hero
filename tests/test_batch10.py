@@ -51,7 +51,9 @@ deletes the sources and a second codec pass would have nothing to work from.
         rows `encode` would run (`cli.encode_rows`), sums `video_seconds`,
         and prints `~ N GB (max M GB)`: the maximum is the bitrate cap times
         the summed seconds; the estimate is the measured bits-per-second for
-        `rate_key(settings)` = (codec, height, fps, encoder) times it. The
+        `rate_key(settings)` = (codec, height, fps, encoder, crf, cap)
+        times it. `parse_bitrate` accepts exactly what ffmpeg means by k/K/M/G
+        and both bitrate flags are validated through it at parse time. The
         measurement encodes a 3-song sample with `keep_source=True` into a
         temp folder, never a song folder, fills `encode.RATE_TABLE`, and is
         skipped when the table already has the key or under `--size-lock`.
@@ -590,17 +592,55 @@ def test_N7_estimate_has_encodes_flags(db, monkeypatch):
     assert a.bitrate_cap == "4M" and a.size_lock is None
 
 
-def test_N7_parse_bitrate_and_rate_key():
+def test_N7_parse_bitrate_speaks_ffmpeg():
+    """ffmpeg reads SI prefixes: `4m` is milli, i.e. `-b:v 0` in disguise."""
     assert enc.parse_bitrate("4M") == 4_000_000
     assert enc.parse_bitrate("800k") == 800_000
     assert enc.parse_bitrate("2500K") == 2_500_000
+    assert enc.parse_bitrate("1G") == 1_000_000_000
     assert enc.parse_bitrate("123456") == 123_456
-    with pytest.raises(ValueError):
-        enc.parse_bitrate("fast")
+    for bad in ("fast", "4m", "4g", "", "4 M"):
+        with pytest.raises(ValueError):
+            enc.parse_bitrate(bad)
+
+
+def test_N7_encode_and_estimate_refuse_a_bitrate_ffmpeg_would_misread(
+        db, monkeypatch):
+    for cmd in ("encode", "estimate"):
+        for flag in ("--bitrate-cap", "--size-lock"):
+            with pytest.raises(SystemExit):
+                cli.main(["--db", str(db.path), cmd, flag, "4m"])
+    a = parsed(monkeypatch, db, ["encode", "--bitrate-cap", "6M"])
+    assert a.bitrate_cap == "6M"
+
+
+def test_N7_rate_key_carries_everything_the_rate_depends_on():
+    """`estimate --crf 40` after `--crf 18` must measure again, not reuse."""
     assert (enc.rate_key(enc.EncodeSettings(codec="h264_nvenc", height=720,
                                             fps=24.0))
-            == ("h264_nvenc", 720, 24.0, "h264_nvenc"))
-    assert enc.rate_key(enc.EncodeSettings()) == ("vp8", 1080, 30.0, "libvpx")
+            == ("h264_nvenc", 720, 24.0, "h264_nvenc", 23, "4M"))
+    assert enc.rate_key(enc.EncodeSettings()) == ("vp8", 1080, 30.0, "libvpx",
+                                                  31, "4M")
+    assert (enc.rate_key(enc.EncodeSettings(crf=18))
+            != enc.rate_key(enc.EncodeSettings(crf=40)))
+    assert (enc.rate_key(enc.EncodeSettings(bitrate_cap="2M"))
+            != enc.rate_key(enc.EncodeSettings()))
+    # Under a size lock the rate is the lock; the table is not consulted.
+    assert (enc.rate_key(enc.EncodeSettings(size_lock="2M"))
+            == enc.rate_key(enc.EncodeSettings(size_lock="3M")))
+
+
+def test_N7_a_changed_quality_measures_again(db, monkeypatch, capsys):
+    lib = db.path.parent
+    for n in ("a", "b", "c"):
+        song(db, lib / n)
+    rates = iter([2_000_000.0, 800_000.0])
+    monkeypatch.setattr(enc, "measure_rate", lambda *a, **k: next(rates))
+    cli.cmd_estimate(encode_args(crf=18), db)
+    assert "~ 0.15 GB" in capsys.readouterr().out
+    cli.cmd_estimate(encode_args(crf=40), db)
+    assert "~ 0.06 GB" in capsys.readouterr().out
+    assert len(enc.RATE_TABLE) == 2
 
 
 def test_N7_estimate_prints_gb_and_max_and_fills_the_table(db, monkeypatch,

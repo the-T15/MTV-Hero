@@ -1709,9 +1709,17 @@ def bitrate(text: str) -> str:
     the same word.
     """
     try:
-        enc.parse_bitrate(text)
+        value = enc.parse_bitrate(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+    # `0` is a well-spelled bitrate and the one number that must never reach
+    # ffmpeg: `-b:v 0` is the VP9 idiom that makes libvpx-VP8 fall back to
+    # 256 kbit/s. parse_bitrate reads spellings, so the value rule lives here.
+    if value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: a bitrate of zero makes libvpx fall back to "
+            f"256 kbit/s and ignore the quality setting entirely"
+        )
     return text
 
 

@@ -34,12 +34,20 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
   fallback to software prints a line rather than happening quietly.
 
 ### Fixed
-- `--bitrate-cap` and `--size-lock` are now validated, and a lowercase `m` or
-  `g` is refused with the reason. ffmpeg reads SI prefixes, so `-b:v 4m` is
-  four thousandths of a bit per second: it truncates to zero and produces
-  byte-identical output to `-b:v 0`, the VP8 trap NOTES has recorded since the
-  beginning. `encode --bitrate-cap 4m` silently encoded the library at a sixth
-  of the intended bitrate, and the sources are deleted as it goes.
+- `--bitrate-cap` and `--size-lock` are validated at parse time on both
+  `encode` and `estimate`, so a bad value is an argparse error naming the
+  flag. A bitrate is a number on its own or with `k`, `K`, `M` or `G`, and
+  nothing else - no whitespace, and a zero is refused outright. ffmpeg reads
+  SI prefixes, so `-b:v 4m` is four thousandths of a bit per second: it
+  truncates to zero and produces byte-identical output to `-b:v 0`, the VP8
+  trap NOTES has recorded since the beginning. `encode --bitrate-cap 4m`
+  silently encoded the library at a sixth of the intended bitrate, and the
+  sources are deleted as it goes.
+- `estimate` reuses a measured bitrate only for an encode that would actually
+  produce it. `encode.rate_key` now carries the effective quality number and
+  the bitrate cap alongside the codec, height, frame rate and encoder, so
+  `estimate --crf 40` after `estimate --crf 18` measures again instead of
+  repeating the first answer. Measured 81% apart at those two numbers.
 - A successful encode now deletes the other codec's output from the folder.
   YARG can select the wrong file when a folder holds two videos (YARG #1331),
   and unlike a leftover source file the other codec's output is a real,

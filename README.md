@@ -126,6 +126,7 @@ Stage flags worth knowing:
 | `--crf N` | `encode`, `estimate` | quality number; the codec's own default if unset |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
 | `--bitrate-cap C` | `encode`, `estimate` | ceiling for constant-quality mode (default `4M`) |
+| | | a bitrate is a number on its own or with `k`, `K`, `M` or `G`. Lowercase `m` is **milli** to ffmpeg and is refused |
 | `--max-fps N` | `encode`, `estimate` | cap the frame rate (default 30); slower sources keep their own |
 | `--fps N` | `encode`, `estimate` | force this frame rate, whatever the source runs at |
 | `--size-lock B` | `encode`, `estimate` | target bitrate: predictable size, quality varies. Two passes on `vp8`/`h264`, one on a hardware codec. Not with `--crf` |
@@ -189,6 +190,9 @@ The maximum is arithmetic: the bitrate ceiling times the running time, the
 size if every song spent every bit it is allowed. The estimate is a
 measurement - three songs drawn at random from the run, encoded at those exact
 settings into a temporary folder, their bits per second applied to the rest.
+The measurement is remembered per codec, height, frame rate, quality number
+and cap, so changing any of those measures again rather than reusing a figure
+that was true of a different encode.
 Constant-quality encoding spends what the picture needs, which is usually well
 under the ceiling, so the ceiling on its own is not an answer.
 

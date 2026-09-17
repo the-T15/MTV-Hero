@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -186,10 +187,17 @@ def find_output(song_dir: Path) -> Path | None:
 # you the whole encode - see parse_bitrate.
 BITRATE_SUFFIXES = {"k": 1_000, "K": 1_000, "M": 1_000_000, "G": 1_000_000_000}
 
+# A number, optionally with a dot, optionally with one of those four letters,
+# and nothing else at all - no sign, no space, no second suffix. Anchored at
+# both ends because the whole point is to be no more permissive than ffmpeg.
+_BITRATE = re.compile(r"\A(\d+(?:\.\d+)?)([kKMG]?)\Z")
+
+BITRATE_SPELLING = "a number on its own or with k, K, M or G - 800k, 4M"
+
 
 def parse_bitrate(text: str) -> int:
     """
-    `4M` -> 4000000, reading the suffix exactly as ffmpeg reads it.
+    `4M` -> 4000000, reading the string exactly as ffmpeg reads it.
 
     ffmpeg's expression parser takes SI prefixes, and in SI a lowercase `m`
     is MILLI. `-b:v 4m` is therefore four thousandths of a bit per second,
@@ -198,26 +206,31 @@ def parse_bitrate(text: str) -> int:
     bitrate. Measured: `-b:v 4m` and `-b:v 0` produce byte-identical output.
     A lowercase `g` is not a prefix to ffmpeg at all and is simply refused.
 
-    So this rejects both rather than guessing what was meant. The settings
-    carry the string the user typed all the way to the command line, so a
-    parser that is more generous than ffmpeg is a parser that approves a
-    command line ffmpeg will read differently.
+    So the grammar here is exactly ffmpeg's and not one character wider. The
+    settings carry the string the user typed all the way to the command line,
+    so a parser more generous than ffmpeg is a parser that approves a command
+    line ffmpeg will read differently - which is the whole failure. That
+    includes whitespace: `float()` would accept `"4 "`, ffmpeg will not.
     """
-    s = str(text).strip()
-    mult = 1
-    suffix = s[-1:]
-    if suffix in ("m", "g"):
-        reads = "milli, not mega" if suffix == "m" else "not a prefix at all"
+    s = str(text)
+    found = _BITRATE.match(s)
+    if found:
+        number, suffix = found.groups()
+        return int(float(number) * BITRATE_SUFFIXES.get(suffix, 1))
+
+    # A number with a suffix ffmpeg reads differently is worth its own
+    # sentence: the user wrote something meaningful and got it slightly wrong.
+    tail = s[-1:]
+    if tail in ("m", "g") and _BITRATE.match(s[:-1]):
+        reads = ("milli - a thousandth of a bit per second, which is `-b:v 0` "
+                 "in disguise" if tail == "m" else
+                 "no prefix at all, and refuses the command")
         raise ValueError(
-            f"{text!r}: ffmpeg reads a lowercase {suffix!r} as {reads} - "
-            f"write {s[:-1]}{suffix.upper()}"
+            f"{text!r}: ffmpeg reads a lowercase {tail!r} as {reads}. "
+            f"Write {s[:-1]}{tail.upper()}; the spelling is "
+            f"{BITRATE_SPELLING}."
         )
-    if suffix in BITRATE_SUFFIXES:
-        mult, s = BITRATE_SUFFIXES[suffix], s[:-1]
-    try:
-        return int(float(s) * mult)
-    except ValueError:
-        raise ValueError(f"not a bitrate: {text!r}") from None
+    raise ValueError(f"not a bitrate: {text!r}. Write {BITRATE_SPELLING}.")
 
 
 def _bufsize(cap: str) -> str:
@@ -251,10 +264,25 @@ def output_rate(settings: EncodeSettings, source_fps: float | None) -> float:
 
 
 def rate_key(settings: EncodeSettings) -> tuple:
-    """What a measured bits-per-second figure is actually a figure for."""
+    """
+    What a measured bits-per-second figure is actually a figure for.
+
+    Every setting that changes the size of the output belongs in here, not
+    just the ones that change which encoder runs. `estimate --crf 40` after
+    `estimate --crf 18` has to measure again: the GUI calls `estimate`
+    repeatedly in one process, and `--crf` is exactly the knob someone turns
+    while asking how big it will be. A key that ignored it would answer the
+    first question forever with nothing to show the number was stale.
+
+    The quality number is the EFFECTIVE one, so `--crf 31` on vp8 and no
+    `--crf` at all share a measurement - they are the same encode. Under a
+    size lock nothing consults this table at all; the lock is the rate.
+    """
+    row = codec_of(settings)
     return (settings.codec, settings.height,
-            float(settings.fps or settings.max_fps),
-            codec_of(settings).encoder)
+            float(settings.fps or settings.max_fps), row.encoder,
+            settings.crf if settings.crf is not None else row.crf,
+            settings.bitrate_cap)
 
 
 # Measured bits per second per rate_key, filled by `measure_rate`. A module
