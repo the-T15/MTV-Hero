@@ -5,6 +5,48 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+### Added
+- **Two columns recording what each source is: `source_height`, what was
+  downloaded, and `source_max_height`, the largest height YouTube offers.**
+  A quality tier above `good` is capped by `--height` like every other, so it
+  only buys anything where the source has detail a 1080p download does not,
+  and nothing in the database said which songs those were. Both columns come
+  out of the info dict yt-dlp already returns with a download (`--print-json`),
+  so a download costs no extra request; an existing database gains them on
+  open.
+- `yargvid tag-sources` backfills both columns for songs downloaded before
+  they existed, one metadata request per song, honouring `--reviewed`,
+  `--limit` and `--sleep`. Where the source file is on disk it is probed and
+  wins over the info dict: the dict says what YouTube would hand over today,
+  the file says what we actually have, and only the file can be re-encoded.
+- `download --quality best|super` raises the download ceiling to 2160p, and a
+  typed `--height` overrides it. Songs without a 4K stream are unaffected -
+  they get what there is.
+- `download --upgrade` re-fetches only the songs a bigger file actually
+  exists for, bounded by that ceiling. It is the same video, so `video_id`,
+  the measured offset, `sync_status` and the approval all survive; only
+  `encode_status` goes back to pending. A failed re-fetch writes the note and
+  changes nothing else - the new file is downloaded under a held-back name
+  and swapped in only once it is on disk and has passed the stream check, so
+  a song can never be left with no video at all.
+- `estimate` and `videos` print how many of the songs in front of them have a
+  source above 1080p, and name the gap when some have no recorded size, so
+  the cost of `best` or `super` is visible before the run rather than after
+  it.
+- `encode --keep-source`: a full-quality encode that keeps the source video
+  and leaves the song pending, so two tiers can be encoded from one download
+  and compared by eye. Until now only `--preview` kept a source, and a
+  preview is 480p under the codec's own 800k ceiling, which cannot show a
+  tier difference at all.
+
+### Changed
+- `match.download_video` returns `(path, note, info)` rather than
+  `(path, note)`, and takes `keep_existing`.
+- `retry download` and a re-match both clear the two sizes along with
+  `source_path`. A stale size is worse than none: `--upgrade` reads
+  `source_max_height > source_height` as a reason to spend a download.
+
+
 ## [0.7.1] — 2026-09-18
 
 ### Changed

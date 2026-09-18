@@ -638,6 +638,28 @@ def source_frame_rate(src: Path) -> float | None:
     return None
 
 
+def source_height(src: Path) -> int | None:
+    """
+    The first video stream's picture height, or None if there is no picture.
+
+    What was actually downloaded, as opposed to what yt-dlp said it was
+    fetching: only the file on disk can be re-encoded, so where the two
+    disagree this is the one that counts. Only the first video stream is
+    read, for the same reason `source_frame_rate` reads only the first - a
+    second one is cover art, and an audio stream carries no height at all.
+    """
+    info = au.probe(src)
+    for stream in info.get("streams", []):
+        if stream.get("codec_type") != "video":
+            continue
+        try:
+            height = int(stream.get("height") or 0)
+        except (TypeError, ValueError):
+            return None
+        return height if height > 0 else None
+    return None
+
+
 def _replace_with_retry(tmp: Path, dst: Path, attempts: int = 6) -> str:
     """
     Replace dst with tmp, tolerating transient Windows file locks.

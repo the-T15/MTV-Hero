@@ -449,6 +449,66 @@ def _views(raw) -> int | None:
         return None
 
 
+def _height(raw) -> int | None:
+    """One format's picture height, or None for anything that is not one."""
+    try:
+        h = int(raw)
+    except (TypeError, ValueError):
+        return None
+    # An audio-only format reports 0 or nothing at all. Zero is not a size.
+    return h if h > 0 else None
+
+
+def _largest_height(formats) -> int | None:
+    """The tallest real height in a list of yt-dlp formats, or None."""
+    heights = [h for h in (_height(f.get("height")) for f in formats or ())
+               if h is not None]
+    return max(heights) if heights else None
+
+
+def heights_from_info(info: dict) -> tuple[int | None, int | None]:
+    """
+    What was downloaded, and the largest height the video is offered at.
+
+    Both come out of the info dict yt-dlp already returns with a download, so
+    recording them costs no request of their own. The top-level `height` is
+    the result; a `bestvideo+bestaudio` merge reports no single height for
+    the join, so the video half of `requested_formats` stands in for it.
+
+    The offered figure is never below what was taken: the file is proof that
+    size exists, whatever a truncated format list says. Nothing known at all
+    is (None, None) rather than a zero, which would read as a real answer and
+    stop `tag-sources` ever asking again.
+    """
+    got = _height(info.get("height"))
+    if got is None:
+        got = _largest_height(info.get("requested_formats"))
+    offered = _largest_height(info.get("formats"))
+    if got is not None:
+        offered = got if offered is None else max(offered, got)
+    return got, offered
+
+
+def _parse_info(text: str | None) -> dict:
+    """
+    The info JSON `--print-json` printed, or an empty dict.
+
+    yt-dlp writes its own progress to the same stream, so the first line that
+    is actually an object wins rather than the first line. An unreadable
+    answer is a gap in a report, never a failed download - the video is on
+    disk either way.
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
 def search_candidates(
     artist: str, title: str, chart_seconds: float,
     cookies: str | None = None, sleep: float = 0.0,
@@ -653,17 +713,54 @@ def pick_best(
     return best, candidates, "ok"
 
 
+# The name a held-back download is written under while the video it replaces
+# is still on disk. Deliberately not `video.<something>`: every other stage
+# globs `video.src.*` and the review window globs `video.*`, and a half
+# fetched upgrade must be invisible to both until it has passed the checks.
+HOLD_SUFFIX = "__new"
+
+
+def _swap_in(new: Path, dest: Path) -> tuple[Path | None, str]:
+    """
+    Put a held-back download under the name every other stage looks for.
+
+    `replace` first, so the older video survives right up to the instant it
+    is overwritten, and only then are the other containers cleared - the old
+    file may be a .webm where the new one is a .mkv.
+    """
+    dst = dest.parent / f"{dest.stem}.src{new.suffix}"
+    try:
+        new.replace(dst)
+    except OSError as exc:
+        return None, f"could not replace {dst.name}: {exc}"
+    for old in dest.parent.glob(f"{dest.stem}.src.*"):
+        if old != dst:
+            old.unlink(missing_ok=True)
+    return dst, ""
+
+
 def download_video(
     video_id: str, dest: Path, max_height: int = 1080,
     cookies: str | None = None, sleep: float = 0.0,
-) -> tuple[Path | None, str]:
+    keep_existing: bool = False,
+) -> tuple[Path | None, str, dict]:
     """
     Fetch the winning video at up to `max_height`, WITH its audio track.
 
-    Returns (path, note). The note is empty on success and carries the failure
-    reason otherwise: a pulled video, a format problem and a network blip all
-    exit non-zero, and collapsing them into None left the download stage
-    recording 'failed' with no way to tell which it had been.
+    Returns (path, note, info). The note is empty on success and carries the
+    failure reason otherwise: a pulled video, a format problem and a network
+    blip all exit non-zero, and collapsing them into None left the download
+    stage recording 'failed' with no way to tell which it had been. `info` is
+    yt-dlp's own account of what it fetched, which is where the source sizes
+    come from - asked for alongside the download, so it costs no extra
+    request.
+
+    `keep_existing` holds the new file back under another name until it is on
+    disk and has passed the stream check, then swaps it in. `download
+    --upgrade` re-fetches a video the library already has, and a failed
+    re-fetch must not leave a song with no video at all. Off by default,
+    which is the behaviour every other caller already has: clear the stale
+    file first.
 
     The audio is not kept in the final webm - encode.py strips it with `-an`
     because YARG plays the chart stems. But the sync stage has to hear the
@@ -674,12 +771,15 @@ def download_video(
     The `+bestaudio` is load-bearing.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Remove any previous source. Otherwise a leftover from an earlier match
-    # can be picked up by the glob below when the new download uses a
-    # different container extension.
-    for stale in dest.parent.glob(f"{dest.stem}.src.*"):
+    held = keep_existing and any(dest.parent.glob(f"{dest.stem}.src.*"))
+    stem = f"{dest.stem}{HOLD_SUFFIX}" if held else dest.stem
+    # Remove any previous source under the stem about to be written.
+    # Otherwise a leftover - from an earlier match, or from an upgrade that
+    # failed part way through - can be picked up by the glob below when the
+    # new download uses a different container extension.
+    for stale in dest.parent.glob(f"{stem}.src.*"):
         stale.unlink(missing_ok=True)
-    out = dest.parent / f"{dest.stem}.src.%(ext)s"
+    out = dest.parent / f"{stem}.src.%(ext)s"
     cmd = [
         "yt-dlp",
         f"https://www.youtube.com/watch?v={video_id}",
@@ -689,6 +789,9 @@ def download_video(
         ),
         "--merge-output-format", "mkv",
         "-o", str(out),
+        # The sizes this library records come from here. --print-json is the
+        # variant that still downloads; --dump-json simulates.
+        "--print-json",
         "--no-warnings", "--no-playlist", "--no-part",
     ]
     cmd += cookie_args(cookies)
@@ -697,20 +800,30 @@ def download_video(
     proc = _run(cmd, timeout=3600)
     if proc.returncode != 0:
         err = (proc.stderr or "").strip().replace("\n", " ")
-        return None, err[:200] or f"yt-dlp exit {proc.returncode}"
+        return None, err[:200] or f"yt-dlp exit {proc.returncode}", {}
 
-    hits = list(dest.parent.glob(f"{dest.stem}.src.*"))
+    info = _parse_info(proc.stdout)
+    hits = list(dest.parent.glob(f"{stem}.src.*"))
     if not hits:
-        return None, "yt-dlp reported success but wrote no file"
+        return None, "yt-dlp reported success but wrote no file", info
 
     # Fail loudly here rather than letting a silent file reach sync, where the
-    # only symptom is a useless "empty audio" rejection one stage later.
+    # only symptom is a useless "empty audio" rejection one stage later. What
+    # the rejection deletes is what was just downloaded, which under
+    # `keep_existing` is the held-back name - never the video the song is
+    # playing today. `probed` is not `info`: one is the file on disk, the
+    # other is what yt-dlp says it fetched, and naming both `info` silently
+    # threw the sizes away.
     src = hits[0]
-    info = au.probe(src)
-    streams = info.get("streams", [])
+    probed = au.probe(src)
+    streams = probed.get("streams", [])
     has_video = any(s.get("codec_type") == "video" for s in streams)
     has_audio = any(s.get("codec_type") == "audio" for s in streams)
     if not (has_video and has_audio):
         src.unlink(missing_ok=True)
-        return None, "no audio or video stream in the downloaded file"
-    return src, ""
+        return None, "no audio or video stream in the downloaded file", info
+    if held:
+        src, note = _swap_in(src, dest)
+        if src is None:
+            return None, note, info
+    return src, "", info

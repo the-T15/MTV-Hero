@@ -107,6 +107,7 @@ hours to the whole library.
 | `index` | scan a song library into the database |
 | `match` | find and fingerprint candidate videos |
 | `download` | fetch the winning video |
+| `tag-sources` | record what each source is and the largest size YouTube offers |
 | `sync` | measure and verify the offset |
 | `review` | watch proof clips and approve, defer, replace or drop |
 | `encode` | transcode to the background video YARG plays |
@@ -122,11 +123,16 @@ Stage flags worth knowing:
 | `--redo` | `match` | re-attempt only songs that previously failed |
 | `--recheck` | `sync` | recompute already-synced songs and write only what changed |
 | `--songs F` | `match`, `sync` | run only the song folders listed in file `F`, one per line |
+| `--quality T` | `download` | the tier this download is for: `best` and `super` fetch up to 2160p, the rest 1080p |
+| `--height N` | `download` | tallest stream to fetch (default 1080). Overrides `--quality`'s |
+| `--upgrade` | `download` | re-fetch only the songs offered a bigger file than the one already downloaded |
+| `--reviewed` | `tag-sources` | only songs you approved by eye |
 | `--codec C` | `encode`, `estimate` | `vp8` (the default), `h264`, or a hardware row |
 | `--quality T` | `encode`, `estimate` | `good` (the default), `better`, `best` or `super` — see below |
 | `--height N` | `encode`, `estimate` | **ceiling**, not a target (default 1080). A smaller video keeps its own size |
 | `--crf N` | `encode`, `estimate` | quality number on its own; overrides `--quality`'s and keeps its ceiling |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
+| `--keep-source` | `encode` | full-quality encode that keeps the source and leaves the song pending, so a second tier can be encoded from the same download and the two compared by eye |
 | `--bitrate-cap C` | `encode`, `estimate` | ceiling for constant-quality mode; overrides `--quality`'s and keeps its quality number |
 | | | a bitrate is a number on its own or with `k`, `K`, `M` or `G`. Lowercase `m` is **milli** to ffmpeg and is refused |
 | `--max-fps N` | `encode`, `estimate` | cap the frame rate. Without it the source's own rate is kept, which is what both wikis ask for |
@@ -141,7 +147,8 @@ Stage flags worth knowing:
 | `--mark` | `videos` | record which songs already had a video, for review |
 | `--force` | `export` | overwrite the output CSV (it refuses by default) |
 
-`--cookies` and `--sleep` apply to `match`, `download` and `check`. Every
+`--cookies` and `--sleep` apply to `match`, `download`, `tag-sources`
+and `check`. Every
 `encode` flag is also an `estimate` flag: `estimate` predicts the run that the
 same command line would do, so it has to be able to describe the same run. One
 two go the other way — `--measure` and `--sample-size` are `estimate`'s
@@ -201,9 +208,17 @@ prints what that tier costs on your library rather than on this one.
 **A tier changes bits, not resolution.** Every tier is still capped by
 `--height`, and `--height` is a ceiling — a 720p download stays 720p at every
 tier, because enlarging it adds no detail the file does not have. So an upper
-tier only shows on songs whose *source* is above 1080p, and today the
-pipeline downloads at 1080p. Until that changes, `best` on most of a library
-buys bits and not much else.
+tier only shows on songs whose *source* is above 1080p, and the pipeline
+downloads at 1080p unless it is asked for more.
+
+That is what `tag-sources` and `download --upgrade` are for. `tag-sources`
+records two sizes per song — what was downloaded, and the largest height
+YouTube offers — and a download fills both in for free from then on.
+`estimate` and `videos` then say how many of your sources are above 1080p, so
+the question "is `best` worth it here" has an answer before the run rather
+than after it. Where a bigger file exists, `download --quality best --upgrade`
+goes and fetches it: same video, same offset, same approval, back to pending
+for the encode alone.
 
 `good` is the setting this project has actually run, and the only one with a
 measured bits-per-second figure behind it (on vp8 and `h264_nvenc`). The

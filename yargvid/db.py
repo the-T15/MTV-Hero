@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS songs (
 
     download_status TEXT DEFAULT 'pending',
     source_path     TEXT,
+    source_height   INTEGER,
+    source_max_height INTEGER,
 
     sync_status     TEXT DEFAULT 'pending',
     offset_ms       REAL,
@@ -127,7 +129,9 @@ class Database:
                           ("existing_video", "TEXT"),
                           ("download_note", "TEXT"),
                           ("windows", "INTEGER"),
-                          ("video_seconds", "REAL")):
+                          ("video_seconds", "REAL"),
+                          ("source_height", "INTEGER"),
+                          ("source_max_height", "INTEGER")):
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl}")
         # Same for the candidates table. CREATE TABLE IF NOT EXISTS leaves an
@@ -282,7 +286,12 @@ class Database:
         # Clear anything derived from the stages being invalidated, so nothing
         # stale can be mistaken for a current result.
         derived = {
-            "download": ["source_path"],
+            # The two sizes describe the file `source_path` points at, so
+            # they die with it. A stale one is worse than none: `download
+            # --upgrade` reads `source_max_height > source_height` as a
+            # reason to go and fetch a file it already has.
+            "download": ["source_path", "source_height",
+                         "source_max_height"],
             # `review` is an approval OF the measured offset, so it dies
             # with the measurement. Leaving it behind marked a song as
             # confirmed by eye while its offset was back at pending.

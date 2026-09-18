@@ -363,6 +363,9 @@ def _requeue_after_match(db: Database, d: Path, row) -> None:
     db.update(
         d,
         download_status="pending", source_path=None,
+        # The sizes describe the file just deleted. The new pick is a
+        # different video, and kept they would be read as its.
+        source_height=None, source_max_height=None,
         sync_status="pending", offset_ms=None, spread_ms=None,
         drift_ppm=None, sync_note=None, fp_score=None,
         motion=None, dominance=None, windows=None, video_seconds=None,
@@ -372,21 +375,142 @@ def _requeue_after_match(db: Database, d: Path, row) -> None:
     )
 
 
+# How tall a download goes for, per quality tier. `--height` is a ceiling on
+# the encode; this is the ceiling on the fetch, and the two are different
+# questions - `best` and `super` spend their extra bits on detail, which a
+# 1080p download does not have to give them. Anything not named here is
+# 1080p, which is what every song in this library was fetched at.
+DOWNLOAD_HEIGHTS = {"best": 2160, "super": 2160}
+DEFAULT_DOWNLOAD_HEIGHT = 1080
+
+
+def download_height(args) -> int:
+    """
+    How tall this download run goes, from the tier or from `--height`.
+
+    A typed `--height` wins, which is why the flag defaults to None rather
+    than 1080: a default cannot be told from somebody typing the same number,
+    and `--quality super --height 1080` has to mean what it says.
+    """
+    typed = getattr(args, "height", None)
+    if typed:
+        return int(typed)
+    quality = getattr(args, "quality", None) or ""
+    return DOWNLOAD_HEIGHTS.get(quality, DEFAULT_DOWNLOAD_HEIGHT)
+
+
+def upgrade_rows(db: Database, ceiling: int) -> list:
+    """
+    The songs a re-fetch would actually make bigger, in run order.
+
+    Three conditions, and every one of them is doing work. The video has to
+    be downloaded already - an upgrade re-fetches, it does not fill a gap.
+    Both sizes have to be known, because an unknown one is not a reason to
+    spend a download: `tag-sources` is what fills those in. And the gain has
+    to be reachable under today's ceiling - a 2160p stream is worth nothing
+    to a run that asks for 1080p, and re-fetching it would replace the
+    source with an identical file.
+    """
+    return db.conn.execute(
+        "SELECT * FROM songs WHERE download_status = 'ok' "
+        "AND source_height IS NOT NULL AND source_max_height IS NOT NULL "
+        "AND MIN(source_max_height, ?) > source_height "
+        "ORDER BY song_dir",
+        (int(ceiling),),
+    ).fetchall()
+
+
 def cmd_download(args, db: Database) -> None:
-    rows = db.pending("download", args.limit, getattr(args, "sample", False))
-    print(f"{len(rows)} videos to download")
+    # Once per run: every song in it is fetched at the same ceiling, and a
+    # run that quietly used a different one is not the run that was asked for.
+    ceiling = download_height(args)
+    upgrade = bool(getattr(args, "upgrade", False))
+    if upgrade:
+        # An upgrade is not a download queue. The pending songs have no video
+        # at all and want a plain `download`; these have one and want a
+        # bigger one, and mixing them would hide a re-fetch among new work.
+        rows = upgrade_rows(db, ceiling)
+        if args.limit:
+            rows = rows[: args.limit]
+        print(f"{len(rows)} videos to re-fetch at up to {ceiling}p")
+    else:
+        rows = db.pending("download", args.limit,
+                          getattr(args, "sample", False))
+        print(f"{len(rows)} videos to download at up to {ceiling}p")
     for n, row in enumerate(rows, 1):
         d = Path(row["song_dir"])
         print(f"[{n}/{len(rows)}] {row['title']}", flush=True)
-        src, note = mt.download_video(
-            row["video_id"], d / "video", args.height, args.cookies, args.sleep
+        src, note, info = mt.download_video(
+            row["video_id"], d / "video", ceiling, args.cookies, args.sleep,
+            keep_existing=upgrade,
         )
+        got, offered = mt.heights_from_info(info)
         if src is None:
-            db.update(d, download_status="failed", download_note=note)
+            if upgrade:
+                # The song still has the video it had before this run - the
+                # fetch was held back precisely so that it would. Recording
+                # 'failed' would send a song with a working background to the
+                # manual queue and reset nothing that needs resetting.
+                db.update(d, download_note=note)
+            else:
+                db.update(d, download_status="failed", download_note=note)
             print(f"  Failed: {note}")
-        else:
-            db.update(d, download_status="ok", source_path=str(src),
-                      download_note=None)
+            continue
+        # Both sizes describe the file just written, so both are written even
+        # when they are unknown: a size left over from the previous file
+        # would be read as this one's.
+        fields = dict(download_status="ok", source_path=str(src),
+                      download_note=None,
+                      source_height=got, source_max_height=offered)
+        if upgrade:
+            # The same video at a larger size, so the timing carries over and
+            # so does the approval - only the encode has to happen again.
+            fields.update(encode_status="pending", encode_note=None)
+            print(f"  {got or '?'}p (was {row['source_height'] or '?'}p)")
+        db.update(d, **fields)
+
+
+def cmd_tag_sources(args, db: Database) -> None:
+    """
+    Record what each song's source is, and the largest size it is offered at.
+
+    A download fills both columns for free from the JSON it already asked
+    for. This is the backfill for every song downloaded before that existed,
+    and it is the only part of the batch that costs a request per song.
+
+    The file on disk beats the info dict wherever they disagree. The dict
+    says what YouTube would hand over today; the file says what we actually
+    have, and only the file can be re-encoded.
+    """
+    sql = ("SELECT * FROM songs WHERE video_id IS NOT NULL AND video_id != '' "
+           "AND (source_height IS NULL OR source_max_height IS NULL)")
+    if getattr(args, "reviewed", False):
+        sql += " AND review = 'keep'"
+    rows = db.conn.execute(sql + " ORDER BY song_dir").fetchall()
+    if args.limit:
+        rows = rows[: args.limit]
+    print(f"{len(rows)} songs with no recorded source size")
+
+    for n, row in enumerate(rows, 1):
+        # Between requests, never before the first: a pause ahead of the only
+        # request a one-song run makes is a pause for nothing.
+        if n > 1 and getattr(args, "sleep", 0):
+            time.sleep(args.sleep)
+        d = Path(row["song_dir"])
+        print(f"[{n}/{len(rows)}] {row['artist']} - {row['title']}",
+              flush=True)
+        got, offered = mt.heights_from_info(
+            mt.fetch_metadata(row["video_id"], args.cookies))
+        src = row["source_path"]
+        if src and Path(src).exists():
+            on_disk = enc.source_height(Path(src))
+            if on_disk:
+                got = on_disk
+                # What is on disk is proof that size is on offer, whatever a
+                # format list that has since changed says.
+                offered = on_disk if offered is None else max(offered, on_disk)
+        db.update(d, source_height=got, source_max_height=offered)
+        print(f"  {got or '?'}p, up to {offered or '?'}p on offer")
 
 
 def cmd_sync(args, db: Database) -> None:
@@ -594,6 +718,38 @@ def encode_rows(args, db: Database) -> list:
     return rows[:int(limit)] if limit else rows
 
 
+# The height above which a quality tier above `good` has anything extra to
+# work with. `--height` is a ceiling, so a 1080p source encodes at 1080p
+# whatever the tier; what changes above this figure is how much of the source
+# survives it.
+TIER_SOURCE_HEIGHT = 1080
+
+
+def source_size_line(rows) -> str | None:
+    """
+    One sentence on what these songs were downloaded at, or None for none.
+
+    `estimate` prints it for the songs a run would encode and `videos` for
+    the approved ones, because choosing between `better` and `best` is a
+    question about the sources rather than about the encoder. A song with no
+    recorded size is counted in the total and named as a gap: reporting "0 of
+    190" when nothing has been tagged would read as an answer.
+    """
+    rows = list(rows)
+    if not rows:
+        return None
+    known = [r["source_height"] for r in rows if r["source_height"]]
+    above = sum(1 for h in known if h > TIER_SOURCE_HEIGHT)
+    line = (f"{above} of {len(rows)} sources are above "
+            f"{TIER_SOURCE_HEIGHT}p, which is where a quality tier above "
+            f"good has extra detail to keep")
+    unknown = len(rows) - len(known)
+    if unknown:
+        line += (f"; {unknown} have no recorded size - "
+                 f"run: yargvid tag-sources")
+    return line
+
+
 def encode_settings(args) -> enc.EncodeSettings:
     """
     The settings one `encode` or `estimate` run uses, preview included.
@@ -644,9 +800,18 @@ def cmd_encode(args, db: Database) -> None:
           f"{settings.threads_per_job} threads")
 
     preview = bool(getattr(args, "preview", False))
+    # Keeping the source is what makes a second encode possible, so a run
+    # that keeps it leaves the song pending and records no outcome - the
+    # bookkeeping follows the source rather than the resolution. A preview
+    # has always done this; `--keep-source` is the same thing at full
+    # quality, which is the only way to compare two tiers by eye.
+    keep = preview or bool(getattr(args, "keep_source", False))
     if preview:
         print(f"Previewing {len(rows)} songs at {args.preview_height}p "
               f"(full length, sources kept)")
+    elif keep:
+        print(f"Keeping {len(rows)} source videos; the songs stay pending, "
+              f"so another tier can be encoded from the same download")
 
     jobs = [(Path(r["source_path"]), Path(r["song_dir"])) for r in rows]
     # The offsets come out of the rows already fetched. progress() runs once
@@ -679,10 +844,10 @@ def cmd_encode(args, db: Database) -> None:
                 # the one file that could not be written.
                 fields = dict(ini_status="pending")
                 err = f"encoded, but song.ini could not be written: {exc}"
-            if not preview:
+            if not keep:
                 fields.update(encode_status="ok", encode_note=None)
             db.update(song_dir, **fields)
-        elif not preview:
+        elif not keep:
             # A failed preview is not a failed encode. It leaves the row alone,
             # so the full run still finds the song pending.
             db.update(song_dir, encode_status="failed", encode_note=err)
@@ -690,7 +855,7 @@ def cmd_encode(args, db: Database) -> None:
               f"{Path(song_dir).name} {err}", flush=True)
 
     results = enc.encode_many(jobs, settings, workers, on_done=progress,
-                              keep_source=preview)
+                              keep_source=keep)
 
     if preview:
         failed = sum(1 for ok, _ in results.values() if not ok)
@@ -733,6 +898,9 @@ def cmd_estimate(args, db: Database) -> None:
     if len(rows) > len(measured):
         print(f"{len(rows) - len(measured)} of them have no measured length "
               f"and are not counted - run: yargvid videos --lengths")
+    sizes = source_size_line(rows)
+    if sizes:
+        print(sizes)
 
     try:
         if settings.size_lock:
@@ -1685,6 +1853,12 @@ def cmd_videos(args, db: Database) -> None:
     print(f"  {len(missing):>5} marked encoded but the file is gone")
     print(f"  {len(sources):>5} still hold a downloaded source file")
 
+    # Approved only: these are the songs a real encode run would touch, and
+    # the tier is chosen for them rather than for the library.
+    sizes = source_size_line([r for r in rows if r["review"] == "keep"])
+    if sizes:
+        print(f"\nApproved: {sizes}")
+
     if getattr(args, "mark", False):
         # Record the classification now. Once sync finishes for these songs
         # they become indistinguishable from this pipeline's own work, and the
@@ -1941,10 +2115,29 @@ def main(argv=None) -> int:
     s.set_defaults(fn=cmd_match)
 
     s = sub.add_parser("download", help="fetch the winning videos")
-    s.add_argument("--height", type=int, default=1080)
+    # Default None, not 1080: `download_height` cannot otherwise tell a tier's
+    # ceiling from somebody typing the number it happens to equal.
+    s.add_argument("--height", type=int, default=None,
+                   help=f"tallest stream to fetch (default "
+                        f"{DEFAULT_DOWNLOAD_HEIGHT}); overrides --quality's")
+    s.add_argument("--quality", choices=list(enc.QUALITY_ORDER), default=None,
+                   help="the encode tier this download is for: best and "
+                        "super fetch up to 2160p, the rest 1080p")
+    s.add_argument("--upgrade", action="store_true",
+                   help="re-fetch only the songs offered a bigger file than "
+                        "the one already downloaded")
     s.add_argument("--cookies", default=None)
     s.add_argument("--sleep", type=float, default=1.0)
     s.set_defaults(fn=cmd_download)
+
+    s = sub.add_parser("tag-sources",
+                       help="record what each source is and what is on offer")
+    s.add_argument("--reviewed", action="store_true",
+                   help="only songs marked \u2018Looks right\u2019")
+    s.add_argument("--cookies", default=None)
+    s.add_argument("--sleep", type=float, default=1.0,
+                   help="seconds between yt-dlp requests (default 1.0)")
+    s.set_defaults(fn=cmd_tag_sources)
 
     s = sub.add_parser("sync", help="estimate and verify offsets")
     s.add_argument("--recheck", action="store_true",
@@ -1961,7 +2154,14 @@ def main(argv=None) -> int:
     s.set_defaults(fn=cmd_sync)
 
     s = sub.add_parser("encode", help="transcode to a background video")
-    add_encode_flags(s); s.set_defaults(fn=cmd_encode)
+    add_encode_flags(s)
+    # `encode`'s alone: `estimate` predicts the size of a run, and what
+    # happens to the source afterwards does not change it.
+    s.add_argument("--keep-source", action="store_true",
+                   help="full-quality encode that keeps the source video and "
+                        "leaves the song pending, so a second tier can be "
+                        "encoded from the same download and compared")
+    s.set_defaults(fn=cmd_encode)
 
     # `estimate` answers a question about an encode run, so it has to be able
     # to describe the same run - every flag that changes which songs are
