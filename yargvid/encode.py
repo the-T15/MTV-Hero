@@ -587,19 +587,50 @@ def _supports_fps_mode() -> bool:
         return True
 
 
+# The highest rate a FILE is believed to run at. ffprobe's `r_frame_rate` is
+# the lowest rate that can represent every timestamp, not the real one, and on
+# the mkv yt-dlp writes it falls back to the container's millisecond time base
+# and reads `1000/1`. Since Batch 11 the source rate IS the encode rate when no
+# cap is set, so such a file would have encoded at 1000 fps. Above this bound
+# the reading is treated as unreadable, which `output_rate` turns into 30 or
+# the cap. It bounds what a file claims, never `--fps` or `--max-fps`.
+MAX_SOURCE_FPS = 120.0
+
+
+def _read_rate(text: str | None) -> float | None:
+    """One ffprobe `num/den` reading, or None if it is not a sane rate."""
+    if not text or "/" not in text:
+        return None
+    num, den = text.split("/", 1)
+    try:
+        num, den = float(num), float(den)
+    except ValueError:
+        return None
+    if den <= 0:
+        return None
+    fps = num / den
+    return fps if 0 < fps <= MAX_SOURCE_FPS else None
+
+
 def source_frame_rate(src: Path) -> float | None:
+    """
+    The first video stream's own frame rate, or None if it has no sane one.
+
+    `avg_frame_rate` is the rate the frames actually arrive at, so it is read
+    first; `r_frame_rate` is the nominal maximum and is only the fallback. The
+    first reading that is a fraction within `MAX_SOURCE_FPS` wins. Only the
+    first video stream is read - an audio stream carries the same fields, and
+    a second video stream is cover art, not the picture being encoded.
+    """
     info = au.probe(src)
     for stream in info.get("streams", []):
         if stream.get("codec_type") != "video":
             continue
-        rate = stream.get("r_frame_rate") or ""
-        if "/" in rate:
-            num, den = rate.split("/")
-            try:
-                if float(den) > 0:
-                    return float(num) / float(den)
-            except ValueError:
-                pass
+        for name in ("avg_frame_rate", "r_frame_rate"):
+            fps = _read_rate(stream.get(name))
+            if fps is not None:
+                return fps
+        return None
     return None
 
 

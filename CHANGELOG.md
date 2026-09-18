@@ -47,6 +47,16 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
   `rates` table. Every row already in a database is orphaned by the new
   filter chain regardless; nothing migrates them, they simply never match.
 
+### Fixed
+- The source frame rate the encoder reads is bounded and read from the right
+  field. `source_frame_rate` asks `avg_frame_rate` first and falls back to
+  `r_frame_rate`, and believes neither above `MAX_SOURCE_FPS` (120): on the
+  mkv yt-dlp writes, `r_frame_rate` can be the container's `1000/1` time base
+  rather than a rate, and since the 30 fps cap went away that number would
+  have been the encode rate. An unreadable rate falls back to 30, or to the
+  cap when one is set. The bound is on what a file claims; `--fps` and
+  `--max-fps` are unaffected.
+
 ## [0.6.1] — 2026-09-17
 
 ### Added
