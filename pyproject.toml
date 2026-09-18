@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yargvid"
-version = "0.6.0"
+version = "0.6.1"
 description = "Background music videos for a YARG/CH library"
 readme = "README.md"
 requires-python = ">=3.9"

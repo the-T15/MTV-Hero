@@ -5,6 +5,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-17
+
 ### Added
 - `estimate --measure`: encode a short sample at these settings and use the
   rate it measures. Without it, `estimate` answers from what is already
@@ -203,7 +205,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 - Dead code and stale text removed across the package; README documents
   every subcommand and flag.
 
-[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/the-T15/MTV-Hero/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/the-T15/MTV-Hero/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/the-T15/MTV-Hero/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/the-T15/MTV-Hero/compare/v0.3.0...v0.4.0
