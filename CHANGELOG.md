@@ -5,6 +5,48 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+### Added
+- `encode --quality {good,better,best,super}`, and the same flag on
+  `estimate`. A tier is one word for two numbers - the quality number and the
+  bitrate ceiling - because moving one without the other buys nothing: vp8
+  goes 31/`4M`, 24/`6M`, 18/`8M`, 12/`12M`, and the H.264 family 23/`4M`,
+  20/`6M`, 17/`8M`, 14/`12M`, the three hardware rows included. `good` is
+  today's default unchanged. `--crf` and `--bitrate-cap` each override their
+  own half of a tier and leave the other alone. The numbers live in exactly
+  one table, `encode.QUALITY_TIERS`.
+- `encode.TYPICAL_RATES` carries the vp8 tiers, so `estimate --quality best`
+  answers without measuring. The H.264 tiers above `good` have no published
+  figure, and `estimate` now says which settings nothing is published for and
+  points at `--measure` instead of going quiet.
+
+### Changed
+- **`--height` is a ceiling, not a target: a video smaller than it is no
+  longer enlarged.** A 720p download used to be blown up to 1080p, which adds
+  no detail the file does not have, costs bits and roughly doubles the encode
+  time - and YARG scales whatever it is handed to the screen anyway. The
+  scale box is now the ceiling met against the source and the pad box is the
+  16:9 box at the output height, so at `--height 1080` a 1280x720 source
+  stays 1280x720, a 640x480 one is pillarboxed to 854x480 rather than
+  enlarged, and 3840x2160 still comes down to 1920x1080. `--preview` follows
+  the same rule.
+- **The 30 fps cap is gone.** Both the YARG and the Clone Hero wikis say to
+  keep the source frame rate, and 30 was a cost default rather than a
+  compatibility rule; frames dropped at this stage cannot be got back.
+  `--max-fps` and `EncodeSettings.max_fps` both default to no cap, so a 25
+  fps source encodes at 25 and a 60 fps source at 60. `--max-fps 30` still
+  caps, and 30 is still the fallback for a source whose rate cannot be read.
+- `--bitrate-cap` and `--max-fps` no longer carry a value of their own as a
+  default: the ceiling comes from `--quality`, and an explicit `4M` has to be
+  tellable from the absence of the flag.
+- `--size-lock` refuses a typed `--quality` the way it already refused
+  `--crf`. A lock sets the bitrate and lets the quality fall where it may; a
+  tier sets both, and under a lock `build_command` reads neither.
+- `encode.rate_key` builds its probe command at `KEY_SOURCE_FPS` rather than
+  at `max_fps`. With no cap as the default, `--max-fps 30` and no cap at all
+  would otherwise both resolve to `fps=30.000000` and share one row of the
+  `rates` table. Every row already in a database is orphaned by the new
+  filter chain regardless; nothing migrates them, they simply never match.
+
 ## [0.6.1] — 2026-09-17
 
 ### Added

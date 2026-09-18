@@ -595,11 +595,28 @@ def encode_rows(args, db: Database) -> list:
 
 
 def encode_settings(args) -> enc.EncodeSettings:
-    """The settings one `encode` or `estimate` run uses, preview included."""
+    """
+    The settings one `encode` or `estimate` run uses, preview included.
+
+    `--quality` is a word for two numbers, and either half can be overridden
+    on its own: `--crf` keeps the tier's ceiling and `--bitrate-cap` keeps
+    the tier's quality number. That is why both flags default to None - a
+    default of "4M" cannot be told apart from somebody typing 4M, and the
+    tier would never get a look in.
+
+    `getattr` rather than attribute access because an args namespace built
+    before a flag existed still has to resolve: the GUI and the tests both
+    hand this function namespaces they wrote themselves.
+    """
+    codec = getattr(args, "codec", "vp8")
+    tier_crf, tier_cap = enc.tier_of(getattr(args, "quality", None), codec)
     settings = enc.EncodeSettings(
-        height=args.height, crf=args.crf, cpu_used=args.cpu_used,
-        threads_per_job=args.threads, bitrate_cap=args.bitrate_cap,
-        max_fps=args.max_fps, codec=getattr(args, "codec", "vp8"),
+        height=args.height,
+        crf=args.crf if args.crf is not None else tier_crf,
+        cpu_used=args.cpu_used,
+        threads_per_job=args.threads,
+        bitrate_cap=getattr(args, "bitrate_cap", None) or tier_cap,
+        max_fps=getattr(args, "max_fps", None), codec=codec,
         fps=getattr(args, "fps", None),
         size_lock=getattr(args, "size_lock", None),
     )
@@ -743,7 +760,16 @@ def cmd_estimate(args, db: Database) -> None:
                 label = " [measured]"
             else:
                 typical = enc.typical_rate(settings)
-                if typical is not None:
+                if typical is None:
+                    # A tier nobody has measured is not the same claim as a
+                    # tier that came out at the ceiling, and the number alone
+                    # cannot tell you which you are about to read. Say which
+                    # settings have nothing behind them and what closes it.
+                    print(f"No typical rate is published for "
+                          f"{settings.codec} {settings.height}p at quality "
+                          f"{enc.effective_crf(settings)} - "
+                          f"run: yargvid estimate --measure")
+                else:
                     # Under the ceiling, because a typical figure is not
                     # keyed on one: it is a published constant, and every
                     # dimension added to it is a row nobody measured. An
@@ -1770,23 +1796,32 @@ def add_encode_flags(s) -> None:
     s.add_argument("--codec", choices=list(enc.CODECS), default="vp8",
                    help="output codec (default vp8: the only one YARG is "
                         "known to play on every platform)")
-    s.add_argument("--height", type=int, default=1080)
+    s.add_argument("--quality", choices=list(enc.QUALITY_ORDER), default=None,
+                   help=f"how hard to try, as one word (default "
+                        f"{enc.DEFAULT_QUALITY}). Each tier sets both the "
+                        f"quality number and the bitrate ceiling; every one "
+                        f"of them is still capped by --height")
+    s.add_argument("--height", type=int, default=1080,
+                   help="ceiling, not a target (default 1080): a smaller "
+                        "source keeps its own size and is never enlarged")
     s.add_argument("--crf", type=int, default=None,
-                   help="quality number; default is the codec's own "
-                        "(31 for vp8, 23 for the h264 rows)")
+                   help="quality number; overrides --quality's, and keeps "
+                        "its ceiling (31/23 at the default tier)")
     s.add_argument("--cpu-used", type=int, default=3)
     s.add_argument("--threads", type=int, default=2)
     s.add_argument("--workers", type=int, default=None)
-    s.add_argument("--bitrate-cap", default="4M", type=bitrate,
-                   help="ceiling for constant-quality mode (default 4M)")
-    s.add_argument("--max-fps", type=float, default=30.0,
-                   help="cap the frame rate; slower sources keep their own")
+    s.add_argument("--bitrate-cap", default=None, type=bitrate,
+                   help="ceiling for constant-quality mode; overrides "
+                        "--quality's, and keeps its quality number")
+    s.add_argument("--max-fps", type=float, default=None,
+                   help="cap the frame rate; without it the source's own "
+                        "rate is kept, which is what both wikis ask for")
     s.add_argument("--fps", type=float, default=None,
                    help="force this frame rate, whatever the source runs at")
     s.add_argument("--size-lock", default=None, type=bitrate,
                    help="target bitrate (e.g. 2500k): exact size, quality "
                         "varies per song. Two passes on a software codec, "
-                        "one on a hardware one. Not with --crf")
+                        "one on a hardware one. Not with --crf or --quality")
     s.add_argument("--preview", action="store_true",
                    help="low-res full-length encode to check sync in YARG")
     s.add_argument("--preview-height", type=int, default=480)
@@ -1998,11 +2033,18 @@ def main(argv=None) -> int:
 
     # One sets the bitrate and lets the quality fall where it may; the other
     # sets the quality and lets the bitrate. Given both, the second silently
-    # wins and the run is not the one that was asked for.
+    # wins and the run is not the one that was asked for. A tier is the same
+    # contradiction and worse - it sets a quality number AND a ceiling, and
+    # `build_command` under a lock reads neither - so `--quality super
+    # --size-lock 2500k` quietly gets the lock. It is only a contradiction
+    # when someone TYPED it, which is why --quality defaults to None:
+    # erroring on the tier every run carries would make --size-lock
+    # unreachable.
     locked = getattr(args, "size_lock", None)
-    if locked and getattr(args, "crf", None) is not None:
-        p.error("--size-lock fixes the bitrate and --crf fixes the quality; "
-                "use one or the other")
+    if locked and (getattr(args, "crf", None) is not None
+                   or getattr(args, "quality", None)):
+        p.error("--size-lock fixes the bitrate and --crf and --quality fix "
+                "the quality; use one or the other")
 
     # `doctor` checks the tools installed on this machine and has nothing to
     # ask a database. Opening one CREATES it, so the command whose whole job

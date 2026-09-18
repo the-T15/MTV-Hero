@@ -96,7 +96,7 @@ def estimate_args(**over):
     a = dict(limit=None, sample=False, skip_existing=False, reviewed=False,
              skip_static=True, height=1080, crf=None, cpu_used=3, threads=2,
              workers=None, preview=False, preview_height=480,
-             bitrate_cap="4M", max_fps=30.0, codec="vp8", fps=None,
+             bitrate_cap=None, max_fps=None, codec="vp8", fps=None,
              size_lock=None, measure=False)
     a.update(over)
     return SimpleNamespace(**a)

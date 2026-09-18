@@ -138,7 +138,7 @@ def encode_args(**over):
     a = dict(limit=None, sample=False, skip_existing=False, reviewed=False,
              skip_static=True, height=1080, crf=None, cpu_used=3, threads=2,
              workers=None, preview=False, preview_height=480,
-             bitrate_cap="4M", max_fps=30.0, codec="vp8", fps=None,
+             bitrate_cap=None, max_fps=None, codec="vp8", fps=None,
              size_lock=None)
     a.update(over)
     return SimpleNamespace(**a)
@@ -274,11 +274,13 @@ def test_N1_crf_and_preset_override_the_row_defaults(no_ffmpeg):
     assert cmd[cmd.index("-crf") + 1] == "20"
 
 
-def test_N1_cmd_encode_passes_codec_and_none_crf_into_settings(db, pool):
+def test_N1_cmd_encode_passes_codec_and_the_rows_crf_into_settings(db, pool):
+    # Batch 11: the tier fills the number in rather than leaving it None, and
+    # `good` is the codec row's own, so the command is unchanged.
     song(db, db.path.parent / "s")
     cli.cmd_encode(encode_args(codec="h264"), db)
     s = pool.calls[0]["settings"]
-    assert s.codec == "h264" and s.crf is None
+    assert s.codec == "h264" and enc.effective_crf(s) == 23
 
 
 def test_N1_preview_applies_the_rows_override(db, pool):
@@ -591,7 +593,8 @@ def test_N7_estimate_has_encodes_flags(db, monkeypatch):
                cmd="cmd_estimate")
     assert (a.codec, a.reviewed, a.skip_existing, a.skip_static, a.height,
             a.limit) == ("h264", True, True, False, 720, 5)
-    assert a.bitrate_cap == "4M" and a.size_lock is None
+    assert a.bitrate_cap is None and a.size_lock is None
+    assert cli.encode_settings(a).bitrate_cap == "4M"
 
 
 def test_N7_parse_bitrate_speaks_ffmpeg():

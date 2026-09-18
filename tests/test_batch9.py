@@ -85,7 +85,7 @@ def encode_args(**over):
     a = dict(limit=None, sample=False, skip_existing=False, reviewed=False,
              skip_static=True, height=1080, crf=31, cpu_used=3, threads=2,
              workers=None, preview=False, preview_height=480,
-             bitrate_cap="4M", max_fps=30.0)
+             bitrate_cap=None, max_fps=None)
     a.update(over)
     return SimpleNamespace(**a)
 
@@ -126,10 +126,15 @@ def parsed(monkeypatch, db, argv):
 
 # ------------------------------------------------------------- M2 flags -----
 
-def test_M2_encode_defaults_to_4M_cap_and_30_fps(db, monkeypatch):
+def test_M2_encode_defaults_to_the_good_tier_and_the_source_fps(db,
+                                                                monkeypatch):
+    # Batch 11: neither flag carries a value any more. The ceiling comes from
+    # --quality, so an explicit 4M can be told from the absence of the flag,
+    # and there is no frame-rate cap at all unless one is asked for.
     a = parsed(monkeypatch, db, ["encode"])
-    assert a.bitrate_cap == "4M"
-    assert a.max_fps == 30.0
+    assert a.bitrate_cap is None
+    assert cli.encode_settings(a).bitrate_cap == "4M"
+    assert a.max_fps is None
 
 
 def test_M2_encode_cap_and_fps_flags_are_parsed(db, monkeypatch):

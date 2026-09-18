@@ -71,8 +71,11 @@ def test_R1_key_is_the_command_minus_the_file_specific_parts():
     k = key()
     assert isinstance(k, tuple) and all(isinstance(x, str) for x in k)
     s = enc.EncodeSettings()
+    # Batch 11: the probe command is built at KEY_SOURCE_FPS, not at a rate
+    # that a cap could also produce. "Nothing invented" is the same claim.
     cmd = enc.build_command(Path("C:/lib/a/video.src.mp4"),
-                            Path("C:/lib/a/video.webm.part"), s, 30.0)
+                            Path("C:/lib/a/video.webm.part"), s,
+                            enc.KEY_SOURCE_FPS)
     for token in ("-c:v", "libvpx", "-crf", "31", "-b:v", "4M",
                   "-cpu-used", "3"):
         assert token in k

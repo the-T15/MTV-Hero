@@ -123,13 +123,15 @@ Stage flags worth knowing:
 | `--recheck` | `sync` | recompute already-synced songs and write only what changed |
 | `--songs F` | `match`, `sync` | run only the song folders listed in file `F`, one per line |
 | `--codec C` | `encode`, `estimate` | `vp8` (the default), `h264`, or a hardware row |
-| `--crf N` | `encode`, `estimate` | quality number; the codec's own default if unset |
+| `--quality T` | `encode`, `estimate` | `good` (the default), `better`, `best` or `super` — see below |
+| `--height N` | `encode`, `estimate` | **ceiling**, not a target (default 1080). A smaller video keeps its own size |
+| `--crf N` | `encode`, `estimate` | quality number on its own; overrides `--quality`'s and keeps its ceiling |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
-| `--bitrate-cap C` | `encode`, `estimate` | ceiling for constant-quality mode (default `4M`) |
+| `--bitrate-cap C` | `encode`, `estimate` | ceiling for constant-quality mode; overrides `--quality`'s and keeps its quality number |
 | | | a bitrate is a number on its own or with `k`, `K`, `M` or `G`. Lowercase `m` is **milli** to ffmpeg and is refused |
-| `--max-fps N` | `encode`, `estimate` | cap the frame rate (default 30); slower sources keep their own |
+| `--max-fps N` | `encode`, `estimate` | cap the frame rate. Without it the source's own rate is kept, which is what both wikis ask for |
 | `--fps N` | `encode`, `estimate` | force this frame rate, whatever the source runs at |
-| `--size-lock B` | `encode`, `estimate` | target bitrate: predictable size, quality varies. Two passes on `vp8`/`h264`, one on a hardware codec. Not with `--crf` |
+| `--size-lock B` | `encode`, `estimate` | target bitrate: predictable size, quality varies. Two passes on `vp8`/`h264`, one on a hardware codec. Not with `--crf` or `--quality` |
 | `--skip-static` | `encode`, `estimate` | leave album-art backgrounds unencoded (the default) |
 | `--include-static` | `encode`, `estimate` | encode album-art backgrounds too |
 | `--skip-existing` | `encode`, `estimate` | leave folders that already hold a video |
@@ -176,6 +178,36 @@ source and any other video file in the folder — a `video.mp4` when it writes
 `video.webm`, and the other way round. It cannot tell one of its own files
 from one that predates this project, and a `--preview` deletes them too, so
 `videos --mark` before your first encode if you want to know what was there.
+
+### Quality
+
+`--quality` is one word for two numbers — how hard the encoder is asked to
+try, and the bitrate it is allowed to spend. Moving one without the other
+buys nothing: a lower quality number under a 4M ceiling spends what it is
+allowed and then stops.
+
+| tier | vp8 | h264 family | roughly |
+|---|---|---|---|
+| `good` | `-crf 31`, cap `4M` | 23, `4M` | the default. ~100 GB for a 1,400-song library |
+| `better` | 24, `6M` | 20, `6M` | ~1.5x `good` |
+| `best` | 18, `8M` | 17, `8M` | ~2x `good` — the YARG wiki's own export recipe |
+| `super` | 12, `12M` | 14, `12M` | ~3x `good` |
+
+Run `yargvid estimate --quality best --reviewed` before choosing one; it
+prints what that tier costs on your library rather than on this one.
+
+**A tier changes bits, not resolution.** Every tier is still capped by
+`--height`, and `--height` is a ceiling — a 720p download stays 720p at every
+tier, because enlarging it adds no detail the file does not have. So an upper
+tier only shows on songs whose *source* is above 1080p, and today the
+pipeline downloads at 1080p. Until that changes, `best` on most of a library
+buys bits and not much else.
+
+`good` is the setting this project has actually run, and the only one with a
+measured bits-per-second figure behind it (on vp8 and `h264_nvenc`). The
+figures for the tiers above it are reasoned from the ceilings, not measured;
+`estimate` says so, and `estimate --measure` replaces one with a number from
+your own videos.
 
 ### How big will it be
 
@@ -332,8 +364,14 @@ metric available. That is why the review step exists.
 ## Tests
 
 ```
-python -m pytest -q           the state-rule suite in tests/, no ffmpeg needed
+python -m pytest -q           the state-rule suite in tests/
 ```
+
+Most of it is pure functions and parsed command lines and needs no ffmpeg.
+`tests/test_batch11.py` is the exception: the scaling and frame-rate tests
+encode two-second synthetic sources with real ffmpeg and ffprobe the result,
+because what a filter chain produces is the whole question there. They skip
+themselves when ffmpeg is not on PATH.
 
 `pytest` collects `tests/` only. The two scripts in the project root are run
 with `python`, as they always have been:

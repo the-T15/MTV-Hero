@@ -9,7 +9,9 @@ finish. `--codec h264` writes an mp4 that both YARG and Clone Hero load on
 Windows, run on 2026-09-17; what is still unrun is Linux and the Steam Deck,
 which is the only reason the default has not moved.
 
-Three changes from the previous approach address the "too slow" problem:
+Four changes from the previous approach. The first three address the
+"too slow" problem; the fourth is a correctness change that happens to
+save time as well:
 
 1. CORRECT CONSTANT-QUALITY FLAGS. libvpx-vp8 is not VP9. The `-b:v 0` idiom
    is VP9-only; for VP8, constrained quality needs `-crf N -b:v <cap>`, where
@@ -22,7 +24,14 @@ Three changes from the previous approach address the "too slow" problem:
 
 3. PRESERVE SOURCE FRAME RATE. Forcing everything to 29.97 introduces judder on
    24 and 25 fps sources for no benefit. We enforce *constant* frame rate at
-   whatever the source natively runs at.
+   whatever the source natively runs at. `--max-fps` is opt-in for that
+   reason: both the YARG and the Clone Hero wikis say to keep the source
+   rate, and a frame dropped here cannot be got back.
+
+4. NEVER ENLARGE. `--height` is a CEILING, not a target. A 720p source stays
+   720p: blowing it up to 1080p adds no detail the file does not have, costs
+   bits and roughly doubles the encode time, and the game scales whatever it
+   is given to the screen anyway. See `video_filter`.
 
 Audio is dropped entirely (`-an`): YARG plays the chart stems, so a soundtrack
 in the background video is dead weight in both file size and encode time.
@@ -147,6 +156,47 @@ OUTPUT_NAMES = tuple(dict.fromkeys(f"video{c.extension}"
                                    for c in CODECS.values()))
 
 
+# How hard the encoder is asked to try, as one word. A tier is a quality
+# number AND a ceiling, because moving one without the other buys nothing:
+# a lower -crf under a 4M cap spends the bits it is allowed and then stops.
+#
+# The numbers are written once per FAMILY and expanded over the codec rows
+# below, so a new row cannot arrive without them. The three hardware rows
+# take H.264's column: -cq, -qp_* and -global_quality are the same scale as
+# libx264's -crf, near enough that a separate column would be inventing
+# precision nobody measured.
+#
+# `good` is the shipped default unchanged - its number IS the codec row's own
+# `crf`, which a test pins, so the table and the rows cannot drift apart.
+# Everything above `good` is a HYPOTHESIS: the steps are even and the
+# ceilings scale with them, and `estimate --measure` is what turns them into
+# figures. This table is the only place any of them live.
+QUALITY_ORDER = ("good", "better", "best", "super")
+DEFAULT_QUALITY = "good"
+
+_TIER_NUMBERS: dict[str, dict[str, tuple[int, str]]] = {
+    "vp8": {
+        "good": (31, "4M"), "better": (24, "6M"),
+        "best": (18, "8M"), "super": (12, "12M"),
+    },
+    "h264": {
+        "good": (23, "4M"), "better": (20, "6M"),
+        "best": (17, "8M"), "super": (14, "12M"),
+    },
+}
+
+QUALITY_TIERS: dict[tuple[str, str], tuple[int, str]] = {
+    (tier, name): _TIER_NUMBERS["vp8" if name == "vp8" else "h264"][tier]
+    for name in CODECS
+    for tier in QUALITY_ORDER
+}
+
+
+def tier_of(tier: str | None, codec: str) -> tuple[int, str]:
+    """The (quality number, ceiling) one tier means on one codec row."""
+    return QUALITY_TIERS[(tier or DEFAULT_QUALITY, codec)]
+
+
 @dataclass
 class EncodeSettings:
     height: int = 1080          # 720 roughly halves encode time
@@ -155,7 +205,9 @@ class EncodeSettings:
     cpu_used: int = 3           # 0-5 with `-deadline good`; higher = faster
     threads_per_job: int = 2
     drop_audio: bool = True
-    max_fps: float = 30.0       # cap only; source rate preserved below this
+    # None = no cap: the source's own rate survives the encode. Both
+    # wikis say to keep it, and a dropped frame cannot be got back.
+    max_fps: float | None = None
     codec: str = "vp8"          # a key of CODECS
     preset: str | None = None   # None = the codec row's own default
     fps: float | None = None    # force a rate; beats max_fps
@@ -260,11 +312,20 @@ def passes(settings: EncodeSettings) -> int:
 
 
 def output_rate(settings: EncodeSettings, source_fps: float | None) -> float:
-    """`--fps` forces a rate; otherwise the source's own, under the cap."""
+    """
+    `--fps` forces a rate; otherwise the source's own, under the cap.
+
+    With no cap - the default - the source rate comes through untouched, so a
+    25 fps source encodes at 25 and a 60 fps one at 60. A cap only ever
+    lowers: `--max-fps 30` leaves a 25 fps source alone. 30 is the fallback
+    for a source whose rate could not be read at all, not a target.
+    """
     if settings.fps:
         fps = float(settings.fps)
     else:
-        fps = min(source_fps or settings.max_fps, settings.max_fps)
+        fps = float(source_fps or settings.max_fps or 30.0)
+        if settings.max_fps:
+            fps = min(fps, float(settings.max_fps))
     return fps if fps > 0 else 30.0
 
 
@@ -290,6 +351,14 @@ def effective_crf(settings: EncodeSettings) -> int:
 KEY_DROP_PAIRS = ("-i", "-threads", "-ss", "-t", "-passlogfile",
                   "-v", "-fps_mode", "-vsync")
 KEY_DROP_FLAGS = ("ffmpeg", "-y", "-nostdin")
+
+# The source rate `rate_key` builds its probe command at. It has to be above
+# any real source rate, so that a cap is the only thing that can lower it and
+# "no cap" keys as itself. It used to be `max_fps`, which worked only while
+# `max_fps` was always a number: with no cap as the default, `--max-fps 30`
+# and no cap at all would both resolve to fps=30.000000 and share one row of
+# the rates table, and they are different recipes over a 60 fps library.
+KEY_SOURCE_FPS = 1000.0
 
 
 def rate_key(settings: EncodeSettings) -> tuple[str, ...]:
@@ -317,13 +386,17 @@ def rate_key(settings: EncodeSettings) -> tuple[str, ...]:
     the middle of a song precisely so that it stands for the whole of it; a
     key that carried the slice would make every sample its own answer.
 
-    The frame rate is resolved against `max_fps` as the source rate, so
-    `--fps`, `--max-fps` and a source slower than either all reach the key
-    through the one `fps=` in the filter chain that ffmpeg is actually given.
+    The frame rate is resolved against `KEY_SOURCE_FPS` as the source rate,
+    so no cap keys as itself and an explicit cap keys as the cap. `--fps N`
+    and `--max-fps N` still key alike, and that is the rule working rather
+    than failing: above a source faster than both they ARE the same command,
+    and the key is the command. They part only on a source below N, and
+    separating them there would mean putting something in the key that is
+    not on the command line.
     """
     probe = replace(settings, clip=None, size_lock=None)
     dst = Path("out")
-    cmd = build_command(Path("in"), dst, probe, probe.max_fps)
+    cmd = build_command(Path("in"), dst, probe, KEY_SOURCE_FPS)
 
     key: list[str] = []
     drop_value = False
@@ -352,9 +425,18 @@ RATE_TABLE: dict[tuple, float] = {}
 # encoder, the height and how hard it is being asked to try - rather than on
 # the whole rate_key, because a typical figure is a published constant and
 # every dimension added to it is one more row nobody has measured.
+# The vp8 tiers above `good` are that measurement scaled by the ratio of the
+# ceilings - 6/4, 8/4 and 12/4 - which is a hypothesis, not a measurement,
+# and `estimate --measure` is what replaces one. The H.264 tiers get no seed
+# at all: only h264_nvenc has a figure here, nobody has measured libx264 on
+# this library, and `estimate` says so and points at --measure rather than
+# quietly answering from a number that was never taken.
 TYPICAL_RATES: dict[tuple, float] = {
-    ("vp8", 1080, 31): 2.9e6,
-    ("h264_nvenc", 1080, 23): 3.4e6,
+    ("vp8", 1080, 31): 2.9e6,       # good, measured 2026-09-17
+    ("vp8", 1080, 24): 4.4e6,       # better
+    ("vp8", 1080, 18): 5.8e6,       # best
+    ("vp8", 1080, 12): 8.7e6,       # super
+    ("h264_nvenc", 1080, 23): 3.4e6,    # good, measured 2026-09-17
 }
 
 
@@ -362,6 +444,55 @@ def typical_rate(settings: EncodeSettings) -> float | None:
     """The published figure for these settings, or None if there is none."""
     return TYPICAL_RATES.get(
         (settings.codec, settings.height, effective_crf(settings))
+    )
+
+
+def box_width(height: int) -> int:
+    """
+    The 16:9 width for a height: 1920, 1280, 854, 640.
+
+    Rounded to the NEAREST even number, which is what ffmpeg's own `round()`
+    does (it is rint, and the default rounding mode is to nearest even), so
+    the Python number and the expression in the pad below cannot disagree.
+    Neither direction is safe on its own: rounding up pads an 854x480 picture
+    to 854x482, because 854*9/16 is 480.375, and the output stops being 16:9;
+    rounding down pillarboxes a 640x480 source to 852x480 rather than the
+    standard 854. No height in range lands exactly on a half, so nearest is
+    unambiguous.
+    """
+    return round(height * 16 / 9 / 2) * 2
+
+
+def video_filter(settings: EncodeSettings, source_fps: float | None) -> str:
+    """
+    Scale under a ceiling, pad out to 16:9, square pixels, constant rate.
+
+    `--height` is a CEILING, so the scale box is the ceiling met against the
+    source - min(W, iw) x min(H, ih) with force_original_aspect_ratio=decrease
+    - and nothing is ever enlarged. A 720p source stays 720p. Blowing it up
+    to 1080p invents no detail, costs bits and roughly doubles the encode
+    time, and the game scales whatever it is handed to the screen anyway.
+
+    The pad box is then the 16:9 box AT THE OUTPUT HEIGHT rather than a fixed
+    1920x1080: a 4:3 source under a 1080 ceiling comes out 854x480
+    pillarboxed, not blown up. Each side is max(content, partner), so the pad
+    can never be asked for a frame smaller than its own input - which ffmpeg
+    refuses outright, and which the naive spelling does on a 3000x500 source.
+
+    It is expressions and not numbers taken off this source on purpose.
+    `rate_key` is the command line, so a chain carrying a probed width would
+    make every source resolution its own row of the rates table and no
+    measurement would ever be reused.
+    """
+    w = box_width(settings.height)
+    h = settings.height
+    return (
+        rf"scale=w=min({w}\,iw):h=min({h}\,ih):flags=lanczos"
+        rf":force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        rf"pad=w=max(iw\,round(ih*16/9/2)*2):h=max(ih\,round(iw*9/16/2)*2)"
+        rf":x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
+        rf"setsar=1,"
+        rf"fps={output_rate(settings, source_fps):.6f}"
     )
 
 
@@ -385,18 +516,7 @@ def build_command(
     sample encode is the real command over a shorter stretch of video.
     """
     row = codec_of(settings)
-    h = settings.height
-    w = int(h * 16 / 9)
-    if w % 2:
-        w += 1
-
-    # Downscale if larger, pad if smaller. Never stretch; SAR stays 1.
-    vf = (
-        f"scale={w}:{h}:flags=lanczos:force_original_aspect_ratio=decrease,"
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"setsar=1"
-    )
-    vf += f",fps={output_rate(settings, source_fps):.6f}"
+    vf = video_filter(settings, source_fps)
 
     # A clip is two flags either side of the input and nothing else. -ss
     # BEFORE -i seeks the input, which is what makes a 20-second sample cost
