@@ -700,7 +700,7 @@ def test_N7_estimate_writes_nothing_and_touches_no_song_folder(db, monkeypatch,
     assert sorted(p.name for p in s.iterdir()) == ["song.ini", "video.mp4.src"]
 
 
-def test_N7_estimate_samples_three_after_the_filters(db, monkeypatch):
+def test_N7_estimate_samples_after_the_filters(db, monkeypatch):
     lib = db.path.parent
     stills = {song(db, lib / f"still{i}", motion=0.01) for i in range(2)}
     footage = {song(db, lib / f"footage{i}") for i in range(5)}
@@ -709,7 +709,7 @@ def test_N7_estimate_samples_three_after_the_filters(db, monkeypatch):
                         lambda rows, *a, **k: sampled.extend(rows) or 1e6)
     cli.cmd_estimate(encode_args(), db)
     dirs = {Path(r["song_dir"]) for r in sampled}
-    assert len(dirs) == 3
+    assert len(dirs) == 5
     assert dirs <= footage and not dirs & stills
 
 

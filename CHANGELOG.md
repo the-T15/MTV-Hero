@@ -5,6 +5,29 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+### Changed
+- **`estimate --measure` measures the same songs every time.** It drew three
+  songs at random per call, so two tiers measured on one library were measured
+  on different footage: busy footage costs more bits than calm footage, and on
+  the real library the draw put `better` above `best` in one round and moved
+  every tier by 25-35% between rounds. The sample is now a fixed set -
+  `encode.sample_songs` orders the rows by the SHA-1 of the song folder's name
+  and takes the first `encode.SAMPLE_SONGS` (50) - so a tier's figure differs
+  from another tier's by the setting and nothing else, a re-run repeats
+  itself, and approving one more song swaps at most one member of the sample.
+- Fifty songs rather than three. The sample has been 20 s a song since 0.6.0,
+  so widening it costs one short encode each, and three videos is thin for a
+  figure the whole library's estimate is multiplied by.
+
+### Added
+- `estimate --sample-size N`, how many songs a measurement encodes a slice of.
+  `estimate`'s alone; `encode` does not take it.
+- A measurement now reports itself: the measured rate in Mbit/s, how long the
+  sample took, and how long the whole run would take at that speed - the
+  sample's wall time scaled by seconds of video in the run over seconds of
+  video in the sample. Printed only when something was actually measured, so a
+  typical or remembered figure says nothing about time it cannot know.
+
 ## [0.7.0] — 2026-09-18
 
 ### Added

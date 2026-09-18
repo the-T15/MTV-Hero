@@ -137,14 +137,16 @@ Stage flags worth knowing:
 | `--skip-existing` | `encode`, `estimate` | leave folders that already hold a video |
 | `--reviewed` | `encode`, `estimate` | only songs you approved by eye |
 | `--measure` | `estimate` | encode a short sample and use its measured rate, instead of a typical or remembered one |
+| `--sample-size N` | `estimate` | how many songs `--measure` encodes a slice of (default 50). Always the same songs, so two settings can be compared |
 | `--mark` | `videos` | record which songs already had a video, for review |
 | `--force` | `export` | overwrite the output CSV (it refuses by default) |
 
 `--cookies` and `--sleep` apply to `match`, `download` and `check`. Every
 `encode` flag is also an `estimate` flag: `estimate` predicts the run that the
 same command line would do, so it has to be able to describe the same run. One
-flag goes the other way — `--measure` is `estimate`'s alone, because it is the
-flag that turns the question into an encode and `encode` is already doing one.
+two go the other way — `--measure` and `--sample-size` are `estimate`'s
+alone, because they describe a measurement and `encode` is already doing the
+run.
 
 ### Codecs
 
@@ -232,14 +234,20 @@ with one from your videos on your machine:
 yargvid estimate --reviewed --measure
 1391 approved songs (32 not yet approved, left alone)
 1391 songs to encode, 78.4 hours of video at vp8 1080p
-Measuring 20 s from each of 3 songs at these settings.
-  Nothing is written to the library: Blur - Song 2, Muse - Hysteria, a-ha - Take On Me
+Measuring 20 s from each of 50 songs at these settings (the same songs every run).
+  Nothing is written to the library: Blur - Song 2, Muse - Hysteria, a-ha - Take On Me, Ash - Girl From Mars, Feeder - Buck Rogers and 45 more
+Measured 2.83 Mbit/s over 50 songs; the sample took 4 min, so the full run would take about 4.7 h at these settings.
 ~ 98.74 GB (max 141.12 GB) [measured]
 ```
 
-It encodes twenty seconds out of the middle of three songs drawn at random
-from the run, at those exact settings, into a temporary folder — seconds, not
-songs, because the figure wanted is per second. The result is remembered in
+It encodes twenty seconds out of the middle of fifty songs, at those exact
+settings, into a temporary folder — seconds, not songs, because the figure
+wanted is per second. The fifty are always the same fifty: the sample is the
+songs whose folder names hash lowest, not a draw, so two tiers measured on one
+library differ by the setting and not by which videos they happened to get.
+`--sample-size N` changes how many; measuring all four tiers at fifty songs is
+a long run, and `--sample-size 10` is the impatient version of the same
+question. The result is remembered in
 the database against the ffmpeg command those settings produce, so the next
 `estimate` at those settings is instant, and changing anything that would
 change that command — the codec, the height, the frame rate, the quality

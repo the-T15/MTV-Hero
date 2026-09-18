@@ -45,6 +45,7 @@ with nothing logged.
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import re
 import shutil
@@ -840,6 +841,87 @@ def default_workers() -> int:
 # two and average over them, short enough that the answer arrives while you
 # are still asking the question.
 SAMPLE_SECONDS = 20.0
+
+# How many songs a measurement encodes a slice of. Fifty rather than the
+# three this used to draw, because the sample is 20 s a song: the cost of
+# widening it is one short encode each, and a figure the whole library's
+# estimate is multiplied by should not rest on three videos.
+SAMPLE_SONGS = 50
+
+
+def sample_songs(rows, n: int = SAMPLE_SONGS) -> list:
+    """
+    The `n` rows a measurement encodes: a fixed set, not a draw.
+
+    Two settings measured on one library have to be measured on the same
+    footage or the figures cannot be compared - busy footage costs more bits
+    than calm footage, and a random draw decided which the tier got. Drawing
+    three at random per call put `better` above `best` in one round and moved
+    every tier by 25-35% between rounds, and nothing above it could tell.
+
+    So the order is the SHA-1 of the song folder's name, ties broken by the
+    full path, and the sample is the first `n` of that order however the rows
+    arrived. A hash rather than a sort by name, so the sample is spread
+    across the library instead of being every song starting with an A; the
+    folder name rather than the path, so moving the library or measuring a
+    copy of it picks the same songs; and a total order, so approving one more
+    song swaps at most one member rather than reshuffling the set.
+    """
+    ordered = sorted(
+        rows,
+        key=lambda r: (
+            hashlib.sha1(
+                Path(r["song_dir"]).name.encode("utf-8")
+            ).hexdigest(),
+            str(r["song_dir"]),
+        ),
+    )
+    return ordered[:n]
+
+
+def sample_seconds(rows) -> float:
+    """
+    Seconds of video a sample of these rows encodes.
+
+    Exactly what `measure_rate` takes: `SAMPLE_SECONDS` from each song, or
+    the whole song when it is shorter, and nothing at all from a song whose
+    length is unknown, because that is the row `measure_rate` skips.
+    """
+    total = 0.0
+    for r in rows:
+        length = float(r["video_seconds"] or 0.0)
+        if length > 0:
+            total += min(SAMPLE_SECONDS, length)
+    return total
+
+
+def projected_seconds(wall: float, sampled: float, total: float) -> float:
+    """
+    How long the whole run would take, from how long the sample took.
+
+    Encoding is paid for per second of video, so the sample's wall time
+    scales by seconds of video in the run over seconds of video in the
+    sample - not by song count, which counts a ninety-second song the same
+    as a nine-minute one.
+    """
+    if sampled <= 0:
+        return 0.0
+    return wall * total / sampled
+
+
+def duration_text(seconds: float) -> str:
+    """
+    A length of time at the precision anybody waiting for it cares about.
+
+    Nobody wants "5400 s", and nobody wants "1.5 h" for a minute and a half
+    either. Seconds up to 90, whole minutes up to 90, then hours to one
+    decimal.
+    """
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    if seconds < 90 * 60:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
 
 
 def encode_many(

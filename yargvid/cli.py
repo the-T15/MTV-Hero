@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import configparser
 import os
-import random
 import re
 import shutil
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -783,15 +783,25 @@ def cmd_estimate(args, db: Database) -> None:
                              "measured figure]")
 
         if rate is None and measured:
-            sample = random.sample(measured, min(3, len(measured)))
+            # The same songs every time, so two tiers measured on this
+            # library differ by the setting and not by which videos the
+            # draw happened to hand them.
+            sample = enc.sample_songs(
+                measured, getattr(args, "sample_size", enc.SAMPLE_SONGS))
             # Short, but real encodes - say what is happening, because there
             # is no progress until it returns.
-            names = ", ".join(Path(r["song_dir"]).name for r in sample)
+            picked = [Path(r["song_dir"]).name for r in sample]
+            names = ", ".join(picked[:5])
+            if len(picked) > 5:
+                names += f" and {len(picked) - 5} more"
             print(f"Measuring {enc.SAMPLE_SECONDS:.0f} s from each of "
-                  f"{len(sample)} songs at these settings.")
+                  f"{len(sample)} songs at these settings "
+                  f"(the same songs every run).")
             print(f"  Nothing is written to the library: {names}")
+            started = time.perf_counter()
             bps = enc.measure_rate(
                 sample, settings, args.workers or enc.default_workers())
+            wall = time.perf_counter() - started
             # A sample where every encode failed measures zero bits per
             # second, which is not a small estimate - it is no estimate.
             # Remembered, it would report this run as free from now on.
@@ -799,6 +809,15 @@ def cmd_estimate(args, db: Database) -> None:
                 enc.RATE_TABLE[key] = bps
                 db.set_rate(key, bps)
                 rate, label = bps, " [measured]"
+                # The sample is the only honest timing this run will get:
+                # it encoded real footage at exactly these settings, on this
+                # machine, at this many workers. Scale it by video seconds.
+                run = enc.projected_seconds(
+                    wall, enc.sample_seconds(sample), seconds)
+                print(f"Measured {bps / 1e6:.2f} Mbit/s over {len(sample)} "
+                      f"songs; the sample took {enc.duration_text(wall)}, "
+                      f"so the full run would take about "
+                      f"{enc.duration_text(run)} at these settings.")
             else:
                 print("The sample encodes produced nothing; "
                       "showing the ceiling only.")
@@ -1786,6 +1805,27 @@ def bitrate(text: str) -> str:
     return text
 
 
+def positive_int(text: str) -> int:
+    """
+    An argparse type for a count of things: a whole number, at least one.
+
+    A sample of zero songs is not a smaller measurement, it is no
+    measurement, and it would report the run as free the way a failed sample
+    would - so it is refused at the flag rather than read as a number later.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: expected a whole number"
+        ) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: expected a whole number of at least 1"
+        )
+    return value
+
+
 def add_encode_flags(s) -> None:
     """
     Every flag that describes an encode run.
@@ -1934,6 +1974,10 @@ def main(argv=None) -> int:
     s.add_argument("--measure", action="store_true",
                    help="encode a short sample at these settings and use "
                         "its rate, instead of a typical or remembered one")
+    s.add_argument("--sample-size", type=positive_int,
+                   default=enc.SAMPLE_SONGS,
+                   help=f"songs a measurement encodes a slice of (default "
+                        f"{enc.SAMPLE_SONGS}); always the same songs")
     s.set_defaults(fn=cmd_estimate)
 
     s = sub.add_parser("ini", help="write video_start_time"); s.set_defaults(fn=cmd_ini)
