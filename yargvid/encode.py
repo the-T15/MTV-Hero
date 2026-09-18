@@ -418,25 +418,28 @@ def rate_key(settings: EncodeSettings) -> tuple[str, ...]:
 # paying for a sample encode each time.
 RATE_TABLE: dict[tuple, float] = {}
 
-# Bits per second measured on this project's own library on 2026-09-17, for
-# the two recipes it has actually run end to end. A first estimate comes from
-# here, so "how much disk does this need" is answered the moment it is asked;
-# `estimate --measure` replaces the figure with one from this machine and
-# these videos. Keyed on the three settings that move the number most - the
-# encoder, the height and how hard it is being asked to try - rather than on
-# the whole rate_key, because a typical figure is a published constant and
-# every dimension added to it is one more row nobody has measured.
-# The vp8 tiers above `good` are that measurement scaled by the ratio of the
-# ceilings - 6/4, 8/4 and 12/4 - which is a hypothesis, not a measurement,
-# and `estimate --measure` is what replaces one. The H.264 tiers get no seed
-# at all: only h264_nvenc has a figure here, nobody has measured libx264 on
-# this library, and `estimate` says so and points at --measure rather than
-# quietly answering from a number that was never taken.
+# Bits per second this library encodes at, for the recipes it has been run
+# at end to end. A first estimate comes from here, so "how much disk does
+# this need" is answered the moment it is asked; `estimate --measure`
+# replaces the figure with one from this machine and these videos. Keyed on
+# the three settings that move the number most - the encoder, the height and
+# how hard it is being asked to try - rather than on the whole rate_key,
+# because a typical figure is a published constant and every dimension added
+# to it is one more row nobody has measured.
+# The four vp8 rows were measured on 2026-09-18 over the approved library,
+# each of them on the one fixed 50-song sample `sample_songs` picks, so the
+# four are comparable: they differ by the tier and by nothing else. They
+# replace the ceiling-ratio arithmetic the tiers above `good` shipped with,
+# which ran high on every row and by almost half on `super`.
+# The H.264 tiers get no seed at all: only h264_nvenc has a figure, taken on
+# 2026-09-17 over three songs, nobody has measured libx264 on this library,
+# and `estimate` says so and points at --measure rather than quietly
+# answering from a number that was never taken.
 TYPICAL_RATES: dict[tuple, float] = {
-    ("vp8", 1080, 31): 2.9e6,       # good, measured 2026-09-17
-    ("vp8", 1080, 24): 4.4e6,       # better
-    ("vp8", 1080, 18): 5.8e6,       # best
-    ("vp8", 1080, 12): 8.7e6,       # super
+    ("vp8", 1080, 31): 2.40e6,      # good, measured 2026-09-18, 50 songs
+    ("vp8", 1080, 24): 3.22e6,      # better, measured 2026-09-18, 50 songs
+    ("vp8", 1080, 18): 3.84e6,      # best, measured 2026-09-18, 50 songs
+    ("vp8", 1080, 12): 4.81e6,      # super, measured 2026-09-18, 50 songs
     ("h264_nvenc", 1080, 23): 3.4e6,    # good, measured 2026-09-17
 }
 

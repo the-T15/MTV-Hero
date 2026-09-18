@@ -537,7 +537,7 @@ def test_Q7_height_is_documented_as_a_ceiling(db, monkeypatch, capsys):
 # ================================================ T  what it is going to cost =
 
 def test_T1_typical_rates_carry_the_vp8_tiers():
-    for crf, bps in ((31, 2.9e6), (24, 4.4e6), (18, 5.8e6), (12, 8.7e6)):
+    for crf, bps in ((31, 2.4e6), (24, 3.22e6), (18, 3.84e6), (12, 4.81e6)):
         assert enc.TYPICAL_RATES[("vp8", 1080, crf)] == pytest.approx(bps)
     assert enc.TYPICAL_RATES[("h264_nvenc", 1080, 23)] == pytest.approx(3.4e6)
     # Nothing is published for the H.264 tiers above `good`.
@@ -548,7 +548,7 @@ def test_T1_typical_rates_carry_the_vp8_tiers():
 
     # A tier looked up through settings, not by hand.
     s = cli.encode_settings(encode_args(quality="best"))
-    assert enc.typical_rate(s) == pytest.approx(5.8e6)
+    assert enc.typical_rate(s) == pytest.approx(3.84e6)
 
 
 def test_T2_a_tier_changes_the_estimate(db, capsys):
@@ -560,9 +560,9 @@ def test_T2_a_tier_changes_the_estimate(db, capsys):
     cli.cmd_estimate(estimate_args(quality="better"), db)
     better = capsys.readouterr().out
 
-    # 2.9 Mbit/s x 600 s = 0.22 GB under a 4M ceiling; 4.4 under 6M = 0.33.
-    assert "~ 0.22 GB (max 0.30 GB)" in good
-    assert "~ 0.33 GB (max 0.45 GB)" in better
+    # 2.4 Mbit/s x 600 s = 0.18 GB under a 4M ceiling; 3.22 under 6M = 0.24.
+    assert "~ 0.18 GB (max 0.30 GB)" in good
+    assert "~ 0.24 GB (max 0.45 GB)" in better
     assert "typical" in good and "typical" in better
 
 

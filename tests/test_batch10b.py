@@ -239,10 +239,10 @@ def test_Q2_song_rows_are_still_never_written(db, monkeypatch, no_typical):
 # ------------------------------------------------------------- Q3 typical ---
 
 def test_Q3_typical_rates_are_seeded_from_the_library_measurements():
-    assert enc.TYPICAL_RATES[("vp8", 1080, 31)] == pytest.approx(2.9e6)
+    assert enc.TYPICAL_RATES[("vp8", 1080, 31)] == pytest.approx(2.4e6)
     assert enc.TYPICAL_RATES[("h264_nvenc", 1080, 23)] == pytest.approx(3.4e6)
-    assert enc.typical_rate(enc.EncodeSettings()) == pytest.approx(2.9e6)
-    assert enc.typical_rate(enc.EncodeSettings(crf=31)) == pytest.approx(2.9e6)
+    assert enc.typical_rate(enc.EncodeSettings()) == pytest.approx(2.4e6)
+    assert enc.typical_rate(enc.EncodeSettings(crf=31)) == pytest.approx(2.4e6)
     assert enc.typical_rate(enc.EncodeSettings(crf=40)) is None
 
 

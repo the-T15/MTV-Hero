@@ -6,6 +6,19 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 ## [Unreleased]
 
 ### Changed
+- **The size estimates for the vp8 quality tiers are measured, not
+  reasoned.** `better`, `best` and `super` were seeded as `good`'s measured
+  figure scaled by the ratio of their bitrate ceilings, which is arithmetic
+  and was printed with the same `[typical]` label as a measurement. All four
+  are now the figures the library itself encodes at - 2.40, 3.22, 3.84 and
+  4.81 Mbit/s, measured on 2026-09-18 over the same fixed 50 songs at each
+  tier. The old numbers were high on every row and nearly half as much again
+  on `super` (8.7 against 4.81): bits bought under a ceiling are not bits the
+  encoder finds a use for. `good` moves too, from 2.9 to 2.40 - its old
+  figure came from three songs drawn at random, and leaving it beside four
+  fifty-song figures would have put the one unlike number in the table where
+  nobody could spot it. The h264_nvenc figure was not re-measured and is
+  unchanged.
 - **`estimate --measure` measures the same songs every time.** It drew three
   songs at random per call, so two tiers measured on one library were measured
   on different footage: busy footage costs more bits than calm footage, and on
