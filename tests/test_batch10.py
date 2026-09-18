@@ -107,6 +107,7 @@ def no_ffmpeg(monkeypatch):
 @pytest.fixture(autouse=True)
 def empty_rate_table(monkeypatch):
     monkeypatch.setattr(enc, "RATE_TABLE", {}, raising=False)
+    monkeypatch.setattr(enc, "TYPICAL_RATES", {}, raising=False)
 
 
 def song(db, path, **cols):
@@ -727,18 +728,21 @@ def test_N7_measure_rate_encodes_into_a_temp_folder_with_sources_kept(
     def fake_many(jobs, settings, workers=None, on_done=None, **kw):
         calls.append(dict(jobs=list(jobs), kw=kw))
         out = {}
-        for _src, d in jobs:
+        for job in jobs:
+            d = job[1]
             enc.output_path(d, settings).write_bytes(b"x" * 25_000)
             out[d] = (True, "")
         return out
 
     monkeypatch.setattr(enc, "encode_many", fake_many)
     bps = enc.measure_rate(rows, enc.EncodeSettings(), workers=1)
-    # 8 x 50,000 bytes over 400 s = 1,000 bits per second.
-    assert bps == pytest.approx(1_000.0)
+    # 8 x 50,000 bytes over the 2 x 20 s slices encoded (Batch 10b) = 10,000
+    # bits per second.
+    assert bps == pytest.approx(10_000.0)
     call = calls[0]
     assert call["kw"].get("keep_source") is True
-    for _src, d in call["jobs"]:
+    for job in call["jobs"]:
+        d = job[1]
         assert lib not in d.parents and d != lib
         assert not d.exists()                  # the temp folder is gone
     for r in rows:

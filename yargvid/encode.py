@@ -2,11 +2,12 @@
 Video encoding, one codec table wide.
 
 Linux and Steam Deck YARG only reliably play VP8 in a WebM container, so VP8
-is the default and the only row this project has confirmed in the game. The
-table below makes the codec a choice anyway, because libvpx is slow enough
-that a 1,400-song library is measured in days: the H.264 rows - libx264 and
-the three hardware encoders - are what make that run finish. `--codec h264`
-is not offered to anyone until one of its files has played in YARG.
+is the default. The table below makes the codec a choice anyway, because
+libvpx is slow enough that a 1,400-song library is measured in days: the
+H.264 rows - libx264 and the three hardware encoders - are what make that run
+finish. `--codec h264` writes an mp4 that both YARG and Clone Hero load on
+Windows, run on 2026-09-17; what is still unrun is Linux and the Steam Deck,
+which is the only reason the default has not moved.
 
 Three changes from the previous approach address the "too slow" problem:
 
@@ -159,6 +160,10 @@ class EncodeSettings:
     preset: str | None = None   # None = the codec row's own default
     fps: float | None = None    # force a rate; beats max_fps
     size_lock: str | None = None    # two-pass target bitrate, e.g. "2500k"
+    # (start, length) in seconds: encode this slice of the source instead of
+    # all of it. Only `measure_rate` sets it - a sample is a slice, and
+    # nothing that lands in a song folder ever is.
+    clip: tuple[float, float] | None = None
 
 
 def codec_of(settings: EncodeSettings) -> Codec:
@@ -263,6 +268,12 @@ def output_rate(settings: EncodeSettings, source_fps: float | None) -> float:
     return fps if fps > 0 else 30.0
 
 
+def effective_crf(settings: EncodeSettings) -> int:
+    """The quality number this encode will really use, default resolved."""
+    row = codec_of(settings)
+    return settings.crf if settings.crf is not None else row.crf
+
+
 def rate_key(settings: EncodeSettings) -> tuple:
     """
     What a measured bits-per-second figure is actually a figure for.
@@ -277,18 +288,41 @@ def rate_key(settings: EncodeSettings) -> tuple:
     The quality number is the EFFECTIVE one, so `--crf 31` on vp8 and no
     `--crf` at all share a measurement - they are the same encode. Under a
     size lock nothing consults this table at all; the lock is the rate.
+
+    `clip` is not in here. A measurement encodes 20 seconds out of the
+    middle of a song precisely so that it stands for the whole of it; a key
+    that carried the slice would make every sample its own answer.
     """
     row = codec_of(settings)
     return (settings.codec, settings.height,
             float(settings.fps or settings.max_fps), row.encoder,
-            settings.crf if settings.crf is not None else row.crf,
-            settings.bitrate_cap)
+            effective_crf(settings), settings.bitrate_cap)
 
 
 # Measured bits per second per rate_key, filled by `measure_rate`. A module
 # global so the GUI can ask `estimate` for a number over and over without
 # paying for a sample encode each time.
 RATE_TABLE: dict[tuple, float] = {}
+
+# Bits per second measured on this project's own library on 2026-09-17, for
+# the two recipes it has actually run end to end. A first estimate comes from
+# here, so "how much disk does this need" is answered the moment it is asked;
+# `estimate --measure` replaces the figure with one from this machine and
+# these videos. Keyed on the three settings that move the number most - the
+# encoder, the height and how hard it is being asked to try - rather than on
+# the whole rate_key, because a typical figure is a published constant and
+# every dimension added to it is one more row nobody has measured.
+TYPICAL_RATES: dict[tuple, float] = {
+    ("vp8", 1080, 31): 2.9e6,
+    ("h264_nvenc", 1080, 23): 3.4e6,
+}
+
+
+def typical_rate(settings: EncodeSettings) -> float | None:
+    """The published figure for these settings, or None if there is none."""
+    return TYPICAL_RATES.get(
+        (settings.codec, settings.height, effective_crf(settings))
+    )
 
 
 def build_command(
@@ -306,6 +340,9 @@ def build_command(
     so it has no container and no output: it ends `-f null` at the null
     device. Both passes share one `-passlogfile`, which is the only thing
     that makes pass 2 a second pass rather than a repeat of the first.
+
+    `settings.clip` adds `-ss` and `-t` and changes nothing else, so a
+    sample encode is the real command over a shorter stretch of video.
     """
     row = codec_of(settings)
     h = settings.height
@@ -321,11 +358,17 @@ def build_command(
     )
     vf += f",fps={output_rate(settings, source_fps):.6f}"
 
-    cmd = [
-        "ffmpeg", "-y", "-v", "error", "-nostdin",
-        "-i", str(src),
-        "-c:v", row.encoder,
-    ]
+    # A clip is two flags either side of the input and nothing else. -ss
+    # BEFORE -i seeks the input, which is what makes a 20-second sample cost
+    # 20 seconds rather than a whole decode with 20 seconds kept; -t after it
+    # bounds the output.
+    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
+    if settings.clip:
+        cmd += ["-ss", f"{settings.clip[0]:.3f}"]
+    cmd += ["-i", str(src)]
+    if settings.clip:
+        cmd += ["-t", f"{settings.clip[1]:.3f}"]
+    cmd += ["-c:v", row.encoder]
 
     if settings.size_lock:
         # Target bitrate: the size is the input and the quality is whatever
@@ -602,15 +645,27 @@ def default_workers() -> int:
     return max(1, (os.cpu_count() or 2) // 2)
 
 
+# How much of each song a measurement encodes. Long enough to cover a cut or
+# two and average over them, short enough that the answer arrives while you
+# are still asking the question.
+SAMPLE_SECONDS = 20.0
+
+
 def encode_many(
-    jobs: list[tuple[Path, Path]],
+    jobs: list[tuple],
     settings: EncodeSettings,
     workers: int | None = None,
     on_done=None,
     keep_source: bool = False,
 ) -> dict[Path, tuple[bool, str]]:
     """
-    Run many encodes concurrently. `jobs` is a list of (src, song_dir).
+    Run many encodes concurrently.
+
+    A job is (src, song_dir), or (src, song_dir, settings) when that one job
+    needs its own. The third element replaces the call's settings entirely
+    for that job and is how a measurement takes a different slice out of
+    every song while still filling one pool: measuring serially would make
+    the sample as slow as the encode it is meant to predict.
 
     `keep_source` is forwarded to every job, which is what lets the preview
     pass run here rather than in a serial loop of its own: a preview is the
@@ -621,8 +676,10 @@ def encode_many(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(encode_one, src, d, settings, keep_source): d
-            for src, d in jobs
+            pool.submit(encode_one, job[0], job[1],
+                        job[2] if len(job) > 2 else settings,
+                        keep_source): job[1]
+            for job in jobs
         }
         for fut in as_completed(futures):
             song_dir = futures[fut]
@@ -641,6 +698,14 @@ def measure_rate(rows, settings: EncodeSettings,
     """
     Bits per second this codec actually produces, from a sample encode.
 
+    The sample is a slice, not the song: `SAMPLE_SECONDS` taken from the
+    middle of each, where the footage is representative and the titles and
+    end cards are not. That is the whole difference between a measurement
+    you wait for and one you ask for - the figure wanted is per second, so
+    encoding whole songs to find it means paying the run to predict the run.
+    Every slice goes into ONE pool call carrying its own `clip`, and the
+    bytes are divided by the seconds actually encoded.
+
     The sample is encoded into a temporary folder, one subfolder per song, and
     the sources are kept. Nothing may be written into a song folder: this runs
     to answer a question before the run starts, and an estimate that left
@@ -658,14 +723,20 @@ def measure_rate(rows, settings: EncodeSettings,
         jobs, seconds = [], {}
         for i, r in enumerate(rows):
             src = r["source_path"]
-            if not src:
+            length = float(r["video_seconds"] or 0.0)
+            # A song of unknown length cannot contribute: its bytes would be
+            # divided by seconds nobody measured, which inflates the rate.
+            if not src or length <= 0:
                 continue
-            # The folder name only has to be unique and recognisable in a
-            # crash; the index keeps two identically-named songs apart.
-            out = root / f"{i:03d}-{Path(r['song_dir']).name}"
+            take = min(SAMPLE_SECONDS, length)
+            # The numbered parent keeps two identically-named songs apart and
+            # the leaf is the song's own name, so a crash leaves a folder
+            # somebody can recognize.
+            out = root / f"{i:03d}" / Path(r["song_dir"]).name
             out.mkdir(parents=True, exist_ok=True)
-            jobs.append((Path(src), out))
-            seconds[out] = float(r["video_seconds"] or 0.0)
+            jobs.append((Path(src), out,
+                         replace(settings, clip=((length - take) / 2, take))))
+            seconds[out] = take
 
         if not jobs:
             return 0.0

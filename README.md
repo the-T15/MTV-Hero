@@ -134,12 +134,15 @@ Stage flags worth knowing:
 | `--include-static` | `encode`, `estimate` | encode album-art backgrounds too |
 | `--skip-existing` | `encode`, `estimate` | leave folders that already hold a video |
 | `--reviewed` | `encode`, `estimate` | only songs you approved by eye |
+| `--measure` | `estimate` | encode a short sample and use its measured rate, instead of a typical or remembered one |
 | `--mark` | `videos` | record which songs already had a video, for review |
 | `--force` | `export` | overwrite the output CSV (it refuses by default) |
 
 `--cookies` and `--sleep` apply to `match`, `download` and `check`. Every
 `encode` flag is also an `estimate` flag: `estimate` predicts the run that the
-same command line would do, so it has to be able to describe the same run.
+same command line would do, so it has to be able to describe the same run. One
+flag goes the other way — `--measure` is `estimate`'s alone, because it is the
+flag that turns the question into an encode and `encode` is already doing one.
 
 ### Codecs
 
@@ -147,17 +150,19 @@ same command line would do, so it has to be able to describe the same run.
 
 | codec | encoder | container | notes |
 |---|---|---|---|
-| `vp8` | libvpx | WebM | the default, and the only one confirmed to play in YARG |
-| `h264` | libx264 | MP4 | much faster than libvpx at the same picture — **not yet confirmed in YARG** |
+| `vp8` | libvpx | WebM | the default — the only format YARG is known to play on every platform |
+| `h264` | libx264 | MP4 | much faster than libvpx at the same picture; plays in YARG and Clone Hero on Windows |
 | `h264_nvenc` | NVIDIA | MP4 | fastest by a wide margin; needs an NVIDIA GPU |
 | `h264_amf` | AMD | MP4 | written but never run by this project |
 | `h264_qsv` | Intel Quick Sync | MP4 | written but never run by this project |
 
-> **Use `vp8` unless you have checked otherwise.** The H.264 rows produce
-> valid, playable mp4 files, but no file from them has been loaded in YARG
-> yet. A full `encode` run deletes every source video, so a codec your YARG
-> build will not load cannot be undone without re-downloading the library.
-> Try one song with `--preview` first — a preview keeps the source.
+> **Use `vp8` unless you are only ever playing on Windows.** An mp4 from
+> `--codec h264` has been loaded and played in both YARG and Clone Hero here,
+> so the container is not the question — the platform is. YARG on Linux and
+> the Steam Deck reliably plays only VP8/WebM, and nobody has tried an H.264
+> file there. A full `encode` run deletes every source video as it goes, so a
+> codec your build will not load cannot be undone without re-downloading the
+> library. Try one song with `--preview` first — a preview keeps the source.
 
 `yargvid doctor` reports each hardware row as `[ok]` or `[absent]`. It asks the
 encoder to encode one frame rather than trusting `ffmpeg -encoders`, because
@@ -174,25 +179,39 @@ from one that predates this project, and a `--preview` deletes them too, so
 
 ### How big will it be
 
-For example — the figures depend on your library and on the sample drawn, so
-run it rather than reading them off here:
+For example — the figures depend on your library, so run it rather than
+reading them off here. It answers straight away:
 
 ```
 yargvid estimate --reviewed
 1391 approved songs (32 not yet approved, left alone)
 1391 songs to encode, 78.4 hours of video at vp8 1080p
-Measuring 3 songs at these settings, which takes as long as encoding them.
-  Nothing is written to the library: Blur - Song 2, Muse - Hysteria, a-ha - Take On Me
-~ 41.20 GB (max 141.12 GB)
+~ 102.31 GB (max 141.12 GB) [typical - estimate --measure for a measured figure]
 ```
 
 The maximum is arithmetic: the bitrate ceiling times the running time, the
 size if every song spent every bit it is allowed. The estimate is a
-measurement - three songs drawn at random from the run, encoded at those exact
-settings into a temporary folder, their bits per second applied to the rest.
-The measurement is remembered per codec, height, frame rate, quality number
-and cap, so changing any of those measures again rather than reusing a figure
-that was true of a different encode.
+bits-per-second figure applied to the whole run, and the label says where
+that figure came from. `[typical]` is a number measured on this project's own
+library, which is a different library from yours. `--measure` replaces it
+with one from your videos on your machine:
+
+```
+yargvid estimate --reviewed --measure
+1391 approved songs (32 not yet approved, left alone)
+1391 songs to encode, 78.4 hours of video at vp8 1080p
+Measuring 20 s from each of 3 songs at these settings.
+  Nothing is written to the library: Blur - Song 2, Muse - Hysteria, a-ha - Take On Me
+~ 98.74 GB (max 141.12 GB) [measured]
+```
+
+It encodes twenty seconds out of the middle of three songs drawn at random
+from the run, at those exact settings, into a temporary folder — seconds, not
+songs, because the figure wanted is per second. The result is remembered in
+the database per codec, height, frame rate, quality number and cap, so the
+next `estimate` at those settings is instant and changing any of them
+measures again rather than reusing a figure that was true of a different
+encode.
 Constant-quality encoding spends what the picture needs, which is usually well
 under the ceiling, so the ceiling on its own is not an answer.
 

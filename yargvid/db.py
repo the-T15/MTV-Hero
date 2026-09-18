@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS candidates (
     view_count INTEGER,
     PRIMARY KEY (song_dir, video_id)
 );
+
+-- What an encode recipe measured, in bits per second. A property of this
+-- machine and this library, not of the process that measured it, so
+-- `estimate` pays for a sample once per database rather than once per run.
+-- The key is exactly encode.rate_key: the six settings that change how big
+-- a second of video comes out.
+CREATE TABLE IF NOT EXISTS rates (
+    codec       TEXT,
+    height      INTEGER,
+    fps         REAL,
+    encoder     TEXT,
+    crf         INTEGER,
+    bitrate_cap TEXT,
+    bps         REAL,
+    measured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (codec, height, fps, encoder, crf, bitrate_cap)
+);
 """
 
 STAGES = ("match", "download", "sync", "encode", "ini")
@@ -159,6 +176,33 @@ class Database:
                  getattr(c, "view_count", None))
                 for c in candidates
             ],
+        )
+        self.conn.commit()
+
+    def get_rate(self, key: tuple) -> float | None:
+        """Bits per second measured for an `encode.rate_key`, if any."""
+        row = self.conn.execute(
+            "SELECT bps FROM rates WHERE codec = ? AND height = ? "
+            "AND fps = ? AND encoder = ? AND crf = ? AND bitrate_cap = ?",
+            tuple(key),
+        ).fetchone()
+        return None if row is None else float(row["bps"])
+
+    def set_rate(self, key: tuple, bps: float) -> None:
+        """
+        Remember what an encode recipe measured.
+
+        Not a song-row write, so it is not `update`'s business: no song is
+        involved, and a measurement outlives every row in the table. The
+        newest figure replaces the older one - the settings are the identity
+        and re-measuring them is the only reason to be here.
+        """
+        self.conn.execute(
+            "INSERT OR REPLACE INTO rates "
+            "(codec, height, fps, encoder, crf, bitrate_cap, bps, "
+            " measured_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            (*tuple(key), float(bps)),
         )
         self.conn.commit()
 

@@ -690,13 +690,21 @@ def cmd_estimate(args, db: Database) -> None:
 
     Two numbers, because they answer two questions. The maximum is
     arithmetic: the bitrate ceiling times the running time, the size if every
-    song spent every bit it is allowed. The estimate is a measurement - a
-    three-song sample encoded at these exact settings into a temporary folder,
-    its bits per second applied to the whole run. Constant-quality encoding
-    spends what the picture needs, which is usually far under the ceiling, so
-    the two are not close and the ceiling alone is not an answer.
+    song spent every bit it is allowed. The estimate is a bits-per-second
+    figure applied to the whole run. Constant-quality encoding spends what
+    the picture needs, which is usually far under the ceiling, so the two are
+    not close and the ceiling alone is not an answer.
 
-    Writes nothing: not to the database, not into a song folder.
+    Where that figure comes from, in order: this process, then this database,
+    then the typical figures in `encode.TYPICAL_RATES`. Only when all three
+    are silent does asking the question cost a sample encode, and
+    `--measure` asks for one regardless. The line says which it used, because
+    a typical figure and a measured one are not the same claim and the number
+    alone cannot tell you which you are reading.
+
+    Writes no song row and nothing into a song folder. A measurement goes
+    into the `rates` table, which is what stops the next run paying for it
+    again.
     """
     rows = encode_rows(args, db)
     settings = enc.resolve_codec(encode_settings(args))
@@ -721,31 +729,60 @@ def cmd_estimate(args, db: Database) -> None:
         print(f"Cannot read that bitrate: {exc}")
         return
 
+    label = ""
     if rate is None:
         key = enc.rate_key(settings)
-        if key not in enc.RATE_TABLE and measured:
+
+        if not getattr(args, "measure", False):
+            # Anything measured beats anything published: it came from this
+            # machine, this ffmpeg and these videos.
+            rate = enc.RATE_TABLE.get(key)
+            if rate is None:
+                rate = db.get_rate(key)
+            if rate is not None:
+                label = " [measured]"
+            else:
+                typical = enc.typical_rate(settings)
+                if typical is not None:
+                    # Under the ceiling, because a typical figure is not
+                    # keyed on one: it is a published constant, and every
+                    # dimension added to it is a row nobody measured. An
+                    # encoder cannot spend more than the cap, so without
+                    # this `estimate --bitrate-cap 800k` prints an estimate
+                    # four times its own stated maximum. A measured figure
+                    # needs no clamp - the cap is part of its key, so it was
+                    # measured under exactly this ceiling.
+                    rate = min(typical, cap)
+                    label = (" [typical - estimate --measure for a "
+                             "measured figure]")
+
+        if rate is None and measured:
             sample = random.sample(measured, min(3, len(measured)))
-            # This encodes them for real, so it takes as long as encoding
-            # them - say so, because there is no progress until it returns.
+            # Short, but real encodes - say what is happening, because there
+            # is no progress until it returns.
             names = ", ".join(Path(r["song_dir"]).name for r in sample)
-            print(f"Measuring {len(sample)} songs at these settings, which "
-                  f"takes as long as encoding them.")
+            print(f"Measuring {enc.SAMPLE_SECONDS:.0f} s from each of "
+                  f"{len(sample)} songs at these settings.")
             print(f"  Nothing is written to the library: {names}")
             bps = enc.measure_rate(
                 sample, settings, args.workers or enc.default_workers())
             # A sample where every encode failed measures zero bits per
-            # second, which is not a small estimate - it is no estimate. Cached
-            # it would report this run as free for the rest of the session.
+            # second, which is not a small estimate - it is no estimate.
+            # Remembered, it would report this run as free from now on.
             if bps > 0:
                 enc.RATE_TABLE[key] = bps
+                db.set_rate(key, bps)
+                rate, label = bps, " [measured]"
             else:
                 print("The sample encodes produced nothing; "
                       "showing the ceiling only.")
-        # With nothing measured the honest estimate is the ceiling.
-        rate = enc.RATE_TABLE.get(key, cap)
+
+        # With nothing measured at all the honest estimate is the ceiling.
+        if rate is None:
+            rate = cap
 
     gb = seconds / 8 / 1e9
-    print(f"~ {rate * gb:.2f} GB (max {cap * gb:.2f} GB)")
+    print(f"~ {rate * gb:.2f} GB (max {cap * gb:.2f} GB){label}")
 
 
 def cmd_ini(args, db: Database) -> None:
@@ -1856,7 +1893,13 @@ def main(argv=None) -> int:
     # encoded, or how big each one comes out.
     s = sub.add_parser("estimate",
                        help="how much disk an encode run would take")
-    add_encode_flags(s); s.set_defaults(fn=cmd_estimate)
+    add_encode_flags(s)
+    # `estimate`'s alone: it is the flag that turns a question into an
+    # encode, and `encode` is already doing one.
+    s.add_argument("--measure", action="store_true",
+                   help="encode a short sample at these settings and use "
+                        "its rate, instead of a typical or remembered one")
+    s.set_defaults(fn=cmd_estimate)
 
     s = sub.add_parser("ini", help="write video_start_time"); s.set_defaults(fn=cmd_ini)
     s = sub.add_parser("diagnose", help="debug one song's match, verbosely")

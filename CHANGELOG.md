@@ -5,6 +5,29 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+### Added
+- `estimate --measure`: encode a short sample at these settings and use the
+  rate it measures. Without it, `estimate` answers from what is already
+  known - this process, then this database, then the typical figures in
+  `encode.TYPICAL_RATES` - and only measures when all three are silent. The
+  printed line ends `[measured]` or `[typical]`, because those are two
+  different claims and the number cannot tell you which one you are reading.
+
+### Changed
+- An `estimate` measurement encodes 20 seconds out of the middle of each
+  sampled song instead of three songs end to end, and submits every slice in
+  one pool call. The figure wanted is per second, so encoding whole songs to
+  find it meant paying for the run in order to predict it.
+- A measured rate is remembered in the database, in a `rates` table keyed
+  exactly as `encode.rate_key`, so a setting is measured once per library
+  rather than once per process.
+- `encode.EncodeSettings.clip` encodes a slice of the source: `-ss` before
+  the input, `-t` after it, nothing else changed. A job given to
+  `encode_many` may carry its own settings as `(src, song_dir, settings)`.
+- `--codec h264` is confirmed: an mp4 from it plays in both YARG and Clone
+  Hero on Windows. VP8 stays the default, now for the Linux and Steam Deck
+  reason alone rather than because H.264 was unproven.
+
 ## [0.6.0] — 2026-09-17
 
 ### Added
