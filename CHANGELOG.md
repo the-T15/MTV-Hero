@@ -5,6 +5,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-18
+
 ### Added
 - `encode --quality {good,better,best,super}`, and the same flag on
   `estimate`. A tier is one word for two numbers - the quality number and the
@@ -257,7 +259,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 - Dead code and stale text removed across the package; README documents
   every subcommand and flag.
 
-[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/the-T15/MTV-Hero/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/the-T15/MTV-Hero/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/the-T15/MTV-Hero/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/the-T15/MTV-Hero/compare/v0.4.0...v0.5.0
