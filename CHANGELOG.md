@@ -5,6 +5,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-18
+
 ### Changed
 - **The size estimates for the vp8 quality tiers are measured, not
   reasoned.** `better`, `best` and `super` were seeded as `good`'s measured
@@ -295,7 +297,8 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 - Dead code and stale text removed across the package; README documents
   every subcommand and flag.
 
-[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/the-T15/MTV-Hero/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/the-T15/MTV-Hero/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/the-T15/MTV-Hero/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/the-T15/MTV-Hero/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/the-T15/MTV-Hero/compare/v0.5.0...v0.6.0
