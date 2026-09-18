@@ -21,6 +21,15 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
 - A measured rate is remembered in the database, in a `rates` table keyed
   exactly as `encode.rate_key`, so a setting is measured once per library
   rather than once per process.
+- `encode.rate_key` is derived from `build_command` instead of being a
+  hand-written tuple: the command line with the input, the output,
+  `-threads`, the clip, the pass log and ffmpeg's constant preamble struck
+  out. Every setting that reaches the command now reaches the key, so
+  `--cpu-used` and the codec row's preset select their own measurement —
+  `-cpu-used 0` against `5` measured 44% apart under one key before this —
+  and a flag added later cannot be forgotten. The `rates` table holds the key as one text
+  column for the same reason; a table in the previous six-column shape is
+  dropped on open, since its rows were not keyed on everything they measured.
 - `encode.EncodeSettings.clip` encodes a slice of the source: `-ss` before
   the input, `-t` after it, nothing else changed. A job given to
   `encode_many` may carry its own settings as `(src, song_dir, settings)`.

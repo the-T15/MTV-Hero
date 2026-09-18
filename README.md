@@ -208,10 +208,12 @@ Measuring 20 s from each of 3 songs at these settings.
 It encodes twenty seconds out of the middle of three songs drawn at random
 from the run, at those exact settings, into a temporary folder — seconds, not
 songs, because the figure wanted is per second. The result is remembered in
-the database per codec, height, frame rate, quality number and cap, so the
-next `estimate` at those settings is instant and changing any of them
-measures again rather than reusing a figure that was true of a different
-encode.
+the database against the ffmpeg command those settings produce, so the next
+`estimate` at those settings is instant, and changing anything that would
+change that command — the codec, the height, the frame rate, the quality
+number, the cap, `--cpu-used`, or the encoder preset a `--preview` switches
+to — measures again rather than reusing a figure that was true of a
+different encode.
 Constant-quality encoding spends what the picture needs, which is usually well
 under the ceiling, so the ceiling on its own is not an answer.
 

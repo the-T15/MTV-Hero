@@ -274,29 +274,69 @@ def effective_crf(settings: EncodeSettings) -> int:
     return settings.crf if settings.crf is not None else row.crf
 
 
-def rate_key(settings: EncodeSettings) -> tuple:
+# What `rate_key` strips out of the command before calling it a key. The
+# pairs are a flag and the value after it; the bare ones stand alone. They
+# name the file being read, the file being written, ffmpeg's own invariant
+# preamble, and how the machine is being driven rather than what is being
+# asked of it. `-vsync` is here beside `-fps_mode` so that the key of a
+# recipe does not depend on which ffmpeg measured it.
+#
+# `-threads` is the one that is not free. libvpx partitions the frame by
+# thread count, so it moves the size: measured on one 20 s 720p-into-360p
+# clip, 1,633,637 bytes at `-threads 1` against 1,887,749 at `-threads 8`,
+# 16% apart. It is out anyway - `--threads` is the flag you turn to fit the
+# machine, not to change the picture - but that is a decision, not a free
+# one, and it is parked in WORKLOG rather than hidden here.
+KEY_DROP_PAIRS = ("-i", "-threads", "-ss", "-t", "-passlogfile",
+                  "-v", "-fps_mode", "-vsync")
+KEY_DROP_FLAGS = ("ffmpeg", "-y", "-nostdin")
+
+
+def rate_key(settings: EncodeSettings) -> tuple[str, ...]:
     """
     What a measured bits-per-second figure is actually a figure for.
 
-    Every setting that changes the size of the output belongs in here, not
-    just the ones that change which encoder runs. `estimate --crf 40` after
-    `estimate --crf 18` has to measure again: the GUI calls `estimate`
-    repeatedly in one process, and `--crf` is exactly the knob someone turns
-    while asking how big it will be. A key that ignored it would answer the
-    first question forever with nothing to show the number was stale.
+    It is a figure for one ffmpeg command line, so the command line is the
+    key. `build_command` is called on these settings and the parts that
+    cannot change the bits are struck out: the input, the output, `-threads`,
+    the clip, the pass log and the constant preamble. What is left is every
+    flag that decides how big a second of video comes out, in the order
+    ffmpeg will receive them.
 
-    The quality number is the EFFECTIVE one, so `--crf 31` on vp8 and no
-    `--crf` at all share a measurement - they are the same encode. Under a
-    size lock nothing consults this table at all; the lock is the rate.
+    This is the point of doing it this way. A hand-written tuple has to be
+    remembered, and it was not: the key carried six settings while `--crf`,
+    `--bitrate-cap`, `--cpu-used` and the codec row's own `preset` all
+    changed the answer, and `cpu_used` alone measured 44% apart under one
+    key. Deriving it from the
+    command means a flag added to `build_command` is in the key the same day,
+    and a flag that changes nothing on the command line changes nothing here.
 
-    `clip` is not in here. A measurement encodes 20 seconds out of the
-    middle of a song precisely so that it stands for the whole of it; a key
-    that carried the slice would make every sample its own answer.
+    Two settings are deliberately taken out first. `size_lock` is ignored
+    because under a lock nothing consults the table at all - the lock IS the
+    rate. `clip` is ignored because a measurement encodes 20 seconds out of
+    the middle of a song precisely so that it stands for the whole of it; a
+    key that carried the slice would make every sample its own answer.
+
+    The frame rate is resolved against `max_fps` as the source rate, so
+    `--fps`, `--max-fps` and a source slower than either all reach the key
+    through the one `fps=` in the filter chain that ffmpeg is actually given.
     """
-    row = codec_of(settings)
-    return (settings.codec, settings.height,
-            float(settings.fps or settings.max_fps), row.encoder,
-            effective_crf(settings), settings.bitrate_cap)
+    probe = replace(settings, clip=None, size_lock=None)
+    dst = Path("out")
+    cmd = build_command(Path("in"), dst, probe, probe.max_fps)
+
+    key: list[str] = []
+    drop_value = False
+    for token in cmd:
+        if drop_value:
+            drop_value = False
+        elif token in KEY_DROP_PAIRS:
+            drop_value = True
+        elif token in KEY_DROP_FLAGS or token == str(dst):
+            continue
+        else:
+            key.append(token)
+    return tuple(key)
 
 
 # Measured bits per second per rate_key, filled by `measure_rate`. A module

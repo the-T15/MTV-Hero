@@ -51,9 +51,10 @@ deletes the sources and a second codec pass would have nothing to work from.
         rows `encode` would run (`cli.encode_rows`), sums `video_seconds`,
         and prints `~ N GB (max M GB)`: the maximum is the bitrate cap times
         the summed seconds; the estimate is the measured bits-per-second for
-        `rate_key(settings)` = (codec, height, fps, encoder, crf, cap)
-        times it. `parse_bitrate` accepts exactly what ffmpeg means by k/K/M/G
-        and both bitrate flags are validated through it at parse time. The
+        `rate_key(settings)`, which covers every setting that changes the
+        bits (Batch 10c), times it. `parse_bitrate` accepts exactly what
+        ffmpeg means by k/K/M/G and both bitrate flags are validated through
+        it at parse time. The
         measurement encodes a 3-song sample with `keep_source=True` into a
         temp folder, never a song folder, fills `encode.RATE_TABLE`, and is
         skipped when the table already has the key or under `--size-lock`.
@@ -617,18 +618,20 @@ def test_N7_encode_and_estimate_refuse_a_bitrate_ffmpeg_would_misread(
 
 def test_N7_rate_key_carries_everything_the_rate_depends_on():
     """`estimate --crf 40` after `--crf 18` must measure again, not reuse."""
-    assert (enc.rate_key(enc.EncodeSettings(codec="h264_nvenc", height=720,
-                                            fps=24.0))
-            == ("h264_nvenc", 720, 24.0, "h264_nvenc", 23, "4M"))
-    assert enc.rate_key(enc.EncodeSettings()) == ("vp8", 1080, 30.0, "libvpx",
-                                                  31, "4M")
-    assert (enc.rate_key(enc.EncodeSettings(crf=18))
-            != enc.rate_key(enc.EncodeSettings(crf=40)))
-    assert (enc.rate_key(enc.EncodeSettings(bitrate_cap="2M"))
-            != enc.rate_key(enc.EncodeSettings()))
+    key = enc.rate_key
+    base = enc.EncodeSettings()
+    assert key(enc.EncodeSettings()) == key(base)
+    assert key(enc.EncodeSettings(crf=31)) == key(base)   # vp8's own default
+    for other in (enc.EncodeSettings(crf=18), enc.EncodeSettings(crf=40),
+                  enc.EncodeSettings(bitrate_cap="2M"),
+                  enc.EncodeSettings(height=720),
+                  enc.EncodeSettings(fps=24.0),
+                  enc.EncodeSettings(codec="h264_nvenc")):
+        assert key(other) != key(base), other
+    assert key(enc.EncodeSettings(crf=18)) != key(enc.EncodeSettings(crf=40))
     # Under a size lock the rate is the lock; the table is not consulted.
-    assert (enc.rate_key(enc.EncodeSettings(size_lock="2M"))
-            == enc.rate_key(enc.EncodeSettings(size_lock="3M")))
+    assert (key(enc.EncodeSettings(size_lock="2M"))
+            == key(enc.EncodeSettings(size_lock="3M")) == key(base))
 
 
 def test_N7_a_changed_quality_measures_again(db, monkeypatch, capsys):

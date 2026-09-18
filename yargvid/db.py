@@ -13,6 +13,7 @@ is ever recomputed by accident, and nothing is lost.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -65,18 +66,14 @@ CREATE TABLE IF NOT EXISTS candidates (
 -- What an encode recipe measured, in bits per second. A property of this
 -- machine and this library, not of the process that measured it, so
 -- `estimate` pays for a sample once per database rather than once per run.
--- The key is exactly encode.rate_key: the six settings that change how big
--- a second of video comes out.
+-- The key is encode.rate_key, which is the ffmpeg command line itself, and
+-- it lands here as one text column on purpose: the settings that decide the
+-- bits are a moving target, and a column per setting is a schema migration
+-- every time a flag is added. One column widens for free.
 CREATE TABLE IF NOT EXISTS rates (
-    codec       TEXT,
-    height      INTEGER,
-    fps         REAL,
-    encoder     TEXT,
-    crf         INTEGER,
-    bitrate_cap TEXT,
-    bps         REAL,
-    measured_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (codec, height, fps, encoder, crf, bitrate_cap)
+    key         TEXT PRIMARY KEY,
+    bps         REAL NOT NULL,
+    measured_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -100,6 +97,11 @@ PREREQ = {
     "ini": "encode_status = 'ok'",
 }
 
+def _rate_id(key: tuple) -> str:
+    """An `encode.rate_key` as the one text column the `rates` table holds."""
+    return json.dumps(list(key))
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -107,6 +109,16 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         # WAL lets the encode workers write progress while readers run.
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # The `rates` key stopped being six columns and became one (Batch
+        # 10c). CREATE TABLE IF NOT EXISTS would leave the old shape exactly
+        # as it was and every read against it would raise, so the old table
+        # goes rather than migrating: its rows were keyed on six settings out
+        # of the many that decide the bits - `cpu_used` among them, which
+        # measured 44% apart under one key - so none of them says what it
+        # claims to say. The shape was never released.
+        columns = {r[1] for r in self.conn.execute("PRAGMA table_info(rates)")}
+        if columns and "key" not in columns:
+            self.conn.execute("DROP TABLE rates")
         self.conn.executescript(SCHEMA)
         # Columns added after a database may already exist in the wild.
         existing = {r[1] for r in self.conn.execute("PRAGMA table_info(songs)")}
@@ -182,9 +194,7 @@ class Database:
     def get_rate(self, key: tuple) -> float | None:
         """Bits per second measured for an `encode.rate_key`, if any."""
         row = self.conn.execute(
-            "SELECT bps FROM rates WHERE codec = ? AND height = ? "
-            "AND fps = ? AND encoder = ? AND crf = ? AND bitrate_cap = ?",
-            tuple(key),
+            "SELECT bps FROM rates WHERE key = ?", (_rate_id(key),)
         ).fetchone()
         return None if row is None else float(row["bps"])
 
@@ -198,11 +208,9 @@ class Database:
         and re-measuring them is the only reason to be here.
         """
         self.conn.execute(
-            "INSERT OR REPLACE INTO rates "
-            "(codec, height, fps, encoder, crf, bitrate_cap, bps, "
-            " measured_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            (*tuple(key), float(bps)),
+            "INSERT OR REPLACE INTO rates (key, bps, measured_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (_rate_id(key), float(bps)),
         )
         self.conn.commit()
 
