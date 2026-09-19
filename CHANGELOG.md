@@ -40,6 +40,40 @@ All notable changes to yargvid (MTV Hero). Versions follow SemVer on the
   tier difference at all.
 
 ### Changed
+- **`--quality` is the tier for a 1080p source, and each song takes the tier
+  its own source can use.** One step down below that height, where a higher
+  tier spends bits on detail the file has not got, and one step up above it,
+  where it has; it stops at `good` and at `super` rather than running off
+  the ends, and a song with no recorded size takes the tier that was typed.
+  57 of this library's 190 approved sources are below 1080p, and until now
+  `--quality best` spent `best`'s bitrate on every one of them. A typed
+  `--crf` or `--bitrate-cap` still holds for the whole run, `--preview` and
+  `--size-lock` read no tier at all, and `encode` and `estimate` both print
+  the mix of tiers before they start.
+- **`estimate` prices each tier in a run separately and adds them up.** Songs
+  are grouped by the ffmpeg command line they would really be encoded with -
+  which is what a bits-per-second figure is a figure for - so a run holding
+  four tiers gets four figures, each from the same process-table, database,
+  typical, sample order as before, and `--measure` measures each group on its
+  own sample. A run holding one prints exactly what it printed before. The
+  last line is the blended total, because "how much disk" wants one number.
+- **A floor of 720p under the scale chain.** A source shorter than that is
+  enlarged until it fits 1280x720 with its shape kept, then padded with black
+  to 16:9; at and above it nothing is ever enlarged, as before. Four approved
+  sources here are 268 to 360 high, and a 268-high background for the game to
+  stretch across a screen is worse than the same picture at 720p with bars.
+  The ceiling still wins where the two meet, so a 480p preview is still 480p.
+  It is an expression in the filter chain, not a number probed off the
+  source, so `rate_key` still carries no source dimension - but every rate
+  already measured under the old chain is keyed on the old command line and
+  will simply never be read again.
+- **`set` clears exactly what a re-match clears.** It carried its own copy of
+  the field list and had fallen behind by `video_seconds` and both source
+  heights, so it left the old video's size behind for the new pick and
+  `download --upgrade` could read that as a reason to spend a re-fetch. There
+  is one list now, `_requeue_after_match`.
+- `videos` says which tier the approved songs would each take, beside the
+  count of sources above 1080p it already printed.
 - `match.download_video` returns `(path, note, info)` rather than
   `(path, note)`, and takes `keep_existing`.
 - `retry download` and a re-match both clear the two sizes along with

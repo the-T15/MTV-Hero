@@ -101,7 +101,8 @@ class FakePool:
         self.calls.append(dict(jobs=list(jobs), settings=settings,
                                workers=workers, kw=kw))
         results = {}
-        for _src, d in jobs:
+        for job in jobs:
+            d = job[1]
             results[d] = ((False, "boom") if d.name in self.failing
                           else (True, ""))
             if on_done:
@@ -294,7 +295,7 @@ def test_M7_default_run_skips_static_and_keeps_unmeasured(db, pool):
     unmeasured = song(db, lib / "unmeasured", motion=None)
     footage = song(db, lib / "footage", motion=0.9)
     assert cli.main(["--db", str(db.path), "encode"]) == 0
-    dirs = {d for _src, d in pool.calls[0]["jobs"]}
+    dirs = {job[1] for job in pool.calls[0]["jobs"]}
     assert dirs == {unmeasured, footage}
     assert row(db, still)["encode_status"] == "pending"
     assert row(db, still)["ini_status"] == "pending"

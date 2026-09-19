@@ -718,34 +718,65 @@ def encode_rows(args, db: Database) -> list:
     return rows[:int(limit)] if limit else rows
 
 
-# The height above which a quality tier above `good` has anything extra to
-# work with. `--height` is a ceiling, so a 1080p source encodes at 1080p
-# whatever the tier; what changes above this figure is how much of the source
-# survives it.
-TIER_SOURCE_HEIGHT = 1080
-
-
 def source_size_line(rows) -> str | None:
     """
     One sentence on what these songs were downloaded at, or None for none.
 
     `estimate` prints it for the songs a run would encode and `videos` for
-    the approved ones, because choosing between `better` and `best` is a
-    question about the sources rather than about the encoder. A song with no
-    recorded size is counted in the total and named as a gap: reporting "0 of
-    190" when nothing has been tagged would read as an answer.
+    the approved ones. It is a question about the height CEILING and nothing
+    else: a source above it comes down to it and loses nothing that would
+    have been visible, and what the tier does with the rest is
+    `tier_mix_line`'s sentence. A song with no recorded size is counted in
+    the total and named as a gap: reporting "0 of 190" when nothing has been
+    tagged would read as an answer.
     """
     rows = list(rows)
     if not rows:
         return None
     known = [r["source_height"] for r in rows if r["source_height"]]
-    above = sum(1 for h in known if h > TIER_SOURCE_HEIGHT)
+    above = sum(1 for h in known if h > enc.TIER_SOURCE_HEIGHT)
     line = (f"{above} of {len(rows)} sources are above "
-            f"{TIER_SOURCE_HEIGHT}p, which is where a quality tier above "
-            f"good has extra detail to keep")
+            f"{enc.TIER_SOURCE_HEIGHT}p and come down to the "
+            f"{enc.TIER_SOURCE_HEIGHT}p ceiling with detail to spare")
     unknown = len(rows) - len(known)
     if unknown:
         line += (f"; {unknown} have no recorded size - "
+                 f"run: yargvid tag-sources")
+    return line
+
+
+def tier_mix_line(rows, quality) -> str | None:
+    """
+    One sentence on which tier each of these songs would encode at.
+
+    `--quality` names one tier and `enc.tier_for_source` turns it into one
+    per song, so a run can carry up to four of them and the flag no longer
+    says what any particular song gets. This is the line that does. Tiers
+    nobody is in are not named, and songs with no recorded size are counted
+    under the typed tier AND named as the gap they are, because that is the
+    one group where the number could still move.
+    """
+    rows = list(rows)
+    if not rows:
+        return None
+    typed = quality or enc.DEFAULT_QUALITY
+    counts: dict[str, int] = {}
+    unknown = 0
+    for r in rows:
+        height = r["source_height"] or None
+        if not height:
+            unknown += 1
+        tier = enc.tier_for_source(typed, height)
+        counts[tier] = counts.get(tier, 0) + 1
+    # Highest tier first: the run's expensive end is what anyone reading this
+    # before starting it wants to see.
+    named = ", ".join(f"{counts[t]} at {t}"
+                      for t in reversed(enc.QUALITY_ORDER) if counts.get(t))
+    line = (f"At --quality {typed}: {named} (the typed tier at "
+            f"{enc.TIER_SOURCE_HEIGHT}p, a step down below it, a step up "
+            f"above it)")
+    if unknown:
+        line += (f"; {unknown} with no recorded size take {typed} - "
                  f"run: yargvid tag-sources")
     return line
 
@@ -787,6 +818,34 @@ def encode_settings(args) -> enc.EncodeSettings:
     return settings
 
 
+def song_settings(args, base: enc.EncodeSettings,
+                  source_height) -> enc.EncodeSettings:
+    """
+    The run's settings as ONE song will really use them.
+
+    `--quality` is the tier for a `TIER_SOURCE_HEIGHT` source, so the tier is
+    a per-song question and this is where it is asked. Only the two numbers a
+    tier supplies can move: a typed `--crf` or `--bitrate-cap` is a decision
+    about the whole run and holds for every song in it, which is what keeps
+    the override worth typing.
+
+    A preview and a size lock read no tier at all. A preview exists to check
+    sync and a lock sets the bitrate outright - `build_command` under one
+    reads neither number - so both hand every song the run's settings
+    unchanged.
+    """
+    if getattr(args, "preview", False) or base.size_lock:
+        return base
+    tier = enc.tier_for_source(getattr(args, "quality", None), source_height)
+    tier_crf, tier_cap = enc.tier_of(tier, base.codec)
+    typed_crf = getattr(args, "crf", None)
+    return replace(
+        base,
+        crf=typed_crf if typed_crf is not None else tier_crf,
+        bitrate_cap=getattr(args, "bitrate_cap", None) or tier_cap,
+    )
+
+
 def cmd_encode(args, db: Database) -> None:
     rows = encode_rows(args, db)
 
@@ -813,7 +872,16 @@ def cmd_encode(args, db: Database) -> None:
         print(f"Keeping {len(rows)} source videos; the songs stay pending, "
               f"so another tier can be encoded from the same download")
 
-    jobs = [(Path(r["source_path"]), Path(r["song_dir"])) for r in rows]
+    # What the run is really going to do, before it starts doing it: one
+    # word on the command line can mean up to four tiers across the songs.
+    if not preview and not settings.size_lock:
+        mix = tier_mix_line(rows, getattr(args, "quality", None))
+        if mix:
+            print(mix)
+
+    jobs = [(Path(r["source_path"]), Path(r["song_dir"]),
+             song_settings(args, settings, r["source_height"]))
+            for r in rows]
     # The offsets come out of the rows already fetched. progress() runs once
     # per finished job, and going back to the database for a number it was
     # handed is one query per song for nothing.
@@ -866,53 +934,42 @@ def cmd_encode(args, db: Database) -> None:
         print("then re-run without --preview for the full-quality encode.")
 
 
-def cmd_estimate(args, db: Database) -> None:
+def _tier_label(settings: enc.EncodeSettings) -> str:
     """
-    What the encode run `encode` would start is going to cost in disk space.
+    The word for one group of an estimate: a tier name where one fits.
 
-    Two numbers, because they answer two questions. The maximum is
-    arithmetic: the bitrate ceiling times the running time, the size if every
-    song spent every bit it is allowed. The estimate is a bits-per-second
-    figure applied to the whole run. Constant-quality encoding spends what
-    the picture needs, which is usually far under the ceiling, so the two are
-    not close and the ceiling alone is not an answer.
-
-    Where that figure comes from, in order: this process, then this database,
-    then the typical figures in `encode.TYPICAL_RATES`. Only when all three
-    are silent does asking the question cost a sample encode, and
-    `--measure` asks for one regardless. The line says which it used, because
-    a typical figure and a measured one are not the same claim and the number
-    alone cannot tell you which you are reading.
-
-    Writes no song row and nothing into a song folder. A measurement goes
-    into the `rates` table, which is what stops the next run paying for it
-    again.
+    A group is a recipe rather than a tier - `--crf 20 --bitrate-cap 5M` is a
+    pair no tier names - so the numbers are looked up in the table and
+    printed as themselves when nothing matches.
     """
-    rows = encode_rows(args, db)
-    settings = enc.resolve_codec(encode_settings(args))
+    pair = (enc.effective_crf(settings), settings.bitrate_cap)
+    for tier in enc.QUALITY_ORDER:
+        if enc.tier_of(tier, settings.codec) == pair:
+            return tier
+    return f"quality {enc.effective_crf(settings)}"
 
-    measured = [r for r in rows if r["video_seconds"]]
-    seconds = sum(float(r["video_seconds"]) for r in measured)
-    print(f"{len(rows)} songs to encode, {seconds / 3600:.1f} hours of video "
-          f"at {settings.codec} {settings.height}p")
-    if len(rows) > len(measured):
-        print(f"{len(rows) - len(measured)} of them have no measured length "
-              f"and are not counted - run: yargvid videos --lengths")
-    sizes = source_size_line(rows)
-    if sizes:
-        print(sizes)
 
-    try:
-        if settings.size_lock:
-            # Under a size lock the target bitrate IS the size. Nothing to
-            # sample: that is the whole point of the mode.
-            rate = cap = float(enc.parse_bitrate(settings.size_lock))
-        else:
-            cap = float(enc.parse_bitrate(settings.bitrate_cap))
-            rate = None
-    except ValueError as exc:
-        print(f"Cannot read that bitrate: {exc}")
-        return
+def _estimate_group(args, db: Database, settings: enc.EncodeSettings,
+                    rows, several: bool) -> tuple[float, float, str]:
+    """
+    One recipe: its estimate in GB, its ceiling in GB, and where the
+    bits-per-second figure came from.
+
+    This is what the whole of `estimate` used to be, and it is unchanged -
+    what moved is how many times it is asked. Songs are grouped by the
+    command line they would really be encoded with, so a run carrying four
+    tiers asks this four times and adds the answers up, and a run carrying
+    one asks it once and prints exactly what it printed before.
+    """
+    seconds = sum(float(r["video_seconds"] or 0.0) for r in rows)
+
+    if settings.size_lock:
+        # Under a size lock the target bitrate IS the size. Nothing to
+        # sample: that is the whole point of the mode.
+        rate = cap = float(enc.parse_bitrate(settings.size_lock))
+    else:
+        cap = float(enc.parse_bitrate(settings.bitrate_cap))
+        rate = None
 
     label = ""
     if rate is None:
@@ -950,12 +1007,14 @@ def cmd_estimate(args, db: Database) -> None:
                     label = (" [typical - estimate --measure for a "
                              "measured figure]")
 
-        if rate is None and measured:
+        if rate is None and rows:
             # The same songs every time, so two tiers measured on this
-            # library differ by the setting and not by which videos the
-            # draw happened to hand them.
+            # library differ by the setting and not by which videos the draw
+            # happened to hand them. Each group samples its OWN songs: a
+            # figure for one recipe has to come off footage that recipe
+            # would really be run over.
             sample = enc.sample_songs(
-                measured, getattr(args, "sample_size", enc.SAMPLE_SONGS))
+                rows, getattr(args, "sample_size", enc.SAMPLE_SONGS))
             # Short, but real encodes - say what is happening, because there
             # is no progress until it returns.
             picked = [Path(r["song_dir"]).name for r in sample]
@@ -995,7 +1054,90 @@ def cmd_estimate(args, db: Database) -> None:
             rate = cap
 
     gb = seconds / 8 / 1e9
-    print(f"~ {rate * gb:.2f} GB (max {cap * gb:.2f} GB){label}")
+    if several:
+        n = len(rows)
+        print(f"  {_tier_label(settings)}: {n} song{'' if n == 1 else 's'}, "
+              f"{seconds / 3600:.1f} h, ~ {rate * gb:.2f} GB "
+              f"(max {cap * gb:.2f} GB){label}")
+    return rate * gb, cap * gb, label
+
+
+def cmd_estimate(args, db: Database) -> None:
+    """
+    What the encode run `encode` would start is going to cost in disk space.
+
+    Two numbers, because they answer two questions. The maximum is
+    arithmetic: the bitrate ceiling times the running time, the size if every
+    song spent every bit it is allowed. The estimate is a bits-per-second
+    figure applied to the whole run. Constant-quality encoding spends what
+    the picture needs, which is usually far under the ceiling, so the two are
+    not close and the ceiling alone is not an answer.
+
+    Where that figure comes from, in order: this process, then this database,
+    then the typical figures in `encode.TYPICAL_RATES`. Only when all three
+    are silent does asking the question cost a sample encode, and
+    `--measure` asks for one regardless. The line says which it used, because
+    a typical figure and a measured one are not the same claim and the number
+    alone cannot tell you which you are reading.
+
+    One run can hold several recipes, because the tier follows each song's
+    source. So the songs are grouped by the command line they would really
+    be encoded with, each group is answered on its own terms, and the total
+    is the sum - with a line per group as well, because a blended figure
+    cannot say which half of the run is the expensive half.
+
+    Writes no song row and nothing into a song folder. A measurement goes
+    into the `rates` table, which is what stops the next run paying for it
+    again.
+    """
+    rows = encode_rows(args, db)
+    settings = enc.resolve_codec(encode_settings(args))
+
+    measured = [r for r in rows if r["video_seconds"]]
+    seconds = sum(float(r["video_seconds"]) for r in measured)
+    print(f"{len(rows)} songs to encode, {seconds / 3600:.1f} hours of video "
+          f"at {settings.codec} {settings.height}p")
+    if len(rows) > len(measured):
+        print(f"{len(rows) - len(measured)} of them have no measured length "
+              f"and are not counted - run: yargvid videos --lengths")
+    sizes = source_size_line(rows)
+    if sizes:
+        print(sizes)
+    if not getattr(args, "preview", False) and not settings.size_lock:
+        mix = tier_mix_line(rows, getattr(args, "quality", None))
+        if mix:
+            print(mix)
+
+    # One group per recipe. Songs encoded by the same ffmpeg command line
+    # share a bits-per-second figure and nothing else does, and `rate_key`
+    # IS that command line - so it is the grouping key by construction, and
+    # a typed --crf that collapses the tiers collapses the groups with them.
+    groups: dict[tuple, tuple[enc.EncodeSettings, list]] = {}
+    for r in measured:
+        per_song = song_settings(args, settings, r["source_height"])
+        groups.setdefault(enc.rate_key(per_song), (per_song, []))[1].append(r)
+    if not groups:
+        # Nothing has a length, so there is nothing to sample and nothing to
+        # multiply. The run still has a ceiling, and that is still an answer.
+        groups = {enc.rate_key(settings): (settings, [])}
+
+    rank = {tier: i for i, tier in enumerate(enc.QUALITY_ORDER)}
+    ordered = sorted(groups.values(),
+                     key=lambda g: -rank.get(_tier_label(g[0]), -1))
+    several = len(ordered) > 1
+
+    try:
+        totals = [_estimate_group(args, db, group, group_rows, several)
+                  for group, group_rows in ordered]
+    except ValueError as exc:
+        print(f"Cannot read that bitrate: {exc}")
+        return
+
+    # A label belongs to one figure. A blended one has as many sources as it
+    # has groups, and each group's line has already said which it used.
+    label = totals[0][2] if len(totals) == 1 else ""
+    print(f"~ {sum(t[0] for t in totals):.2f} GB "
+          f"(max {sum(t[1] for t in totals):.2f} GB){label}")
 
 
 def cmd_ini(args, db: Database) -> None:
@@ -1294,26 +1436,16 @@ def cmd_set(args, db: Database) -> str:
     title = meta.get("title", vid)
     who = meta.get("uploader", "unknown channel")
 
-    # Drop any previously downloaded source so the new one is fetched clean.
-    old = row["source_path"]
-    if old and Path(old).exists():
-        Path(old).unlink(missing_ok=True)
-
-    # Everything measured belongs to the video being replaced. `review` is an
-    # approval of footage that is about to be deleted, and motion, fp_score,
-    # dominance and windows all describe it - left behind they read as current
-    # measurements of a video nobody has downloaded yet.
+    # Everything measured belongs to the video being replaced, so `match`'s
+    # own field list is the right one and keeping a second copy of it here is
+    # how they drift: this one had fallen behind by `video_seconds` and both
+    # source sizes, and `download --upgrade` reads a stale size as a reason
+    # to spend a re-fetch. It deletes the downloaded source too.
+    _requeue_after_match(db, d, row)
     db.update(
         d,
         match_status="ok", video_id=vid, match_score=None,
         match_note=f"MANUAL: {title} [{who}]",
-        download_status="pending", source_path=None,
-        sync_status="pending", offset_ms=None, spread_ms=None,
-        drift_ppm=None, sync_note=None, fp_score=None,
-        motion=None, dominance=None, windows=None,
-        review=None,
-        encode_status="pending", encode_note=None,
-        ini_status="pending",
     )
     print(f"Set {row['artist']} - {row['title']}")
     print(f"  -> {title}")
@@ -1855,9 +1987,15 @@ def cmd_videos(args, db: Database) -> None:
 
     # Approved only: these are the songs a real encode run would touch, and
     # the tier is chosen for them rather than for the library.
-    sizes = source_size_line([r for r in rows if r["review"] == "keep"])
+    approved = [r for r in rows if r["review"] == "keep"]
+    sizes = source_size_line(approved)
     if sizes:
         print(f"\nApproved: {sizes}")
+    # At the default tier, because `videos` takes no --quality: this is the
+    # library as it stands, and the spread is the thing being reported.
+    mix = tier_mix_line(approved, None)
+    if mix:
+        print(f"Approved: {mix}")
 
     if getattr(args, "mark", False):
         # Record the classification now. Once sync finishes for these songs
@@ -2012,12 +2150,16 @@ def add_encode_flags(s) -> None:
                         "known to play on every platform)")
     s.add_argument("--quality", choices=list(enc.QUALITY_ORDER), default=None,
                    help=f"how hard to try, as one word (default "
-                        f"{enc.DEFAULT_QUALITY}). Each tier sets both the "
-                        f"quality number and the bitrate ceiling; every one "
-                        f"of them is still capped by --height")
+                        f"{enc.DEFAULT_QUALITY}), for a "
+                        f"{enc.TIER_SOURCE_HEIGHT}p source: one step less "
+                        f"below it, one more above it. Each tier sets both "
+                        f"the quality number and the bitrate ceiling; every "
+                        f"one of them is still capped by --height")
     s.add_argument("--height", type=int, default=1080,
-                   help="ceiling, not a target (default 1080): a smaller "
-                        "source keeps its own size and is never enlarged")
+                   help=f"ceiling, not a target (default 1080): a source "
+                        f"between {enc.MIN_HEIGHT}p and the ceiling keeps "
+                        f"its own size; smaller ones are brought up to "
+                        f"{enc.MIN_HEIGHT}p")
     s.add_argument("--crf", type=int, default=None,
                    help="quality number; overrides --quality's, and keeps "
                         "its ceiling (31/23 at the default tier)")

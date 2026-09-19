@@ -155,7 +155,8 @@ class FakePool:
         self.calls.append(dict(jobs=list(jobs), settings=settings,
                                workers=workers, kw=kw))
         results = {}
-        for _src, d in jobs:
+        for job in jobs:
+            d = job[1]
             results[d] = ((False, "boom") if d.name in self.failing
                           else (True, ""))
             if on_done:
@@ -475,7 +476,7 @@ def test_N4_skip_existing_sees_either_codecs_file(db, pool):
     (has_webm / "video.webm").write_bytes(b"x")
     bare = song(db, lib / "bare")
     cli.cmd_encode(encode_args(skip_existing=True), db)
-    assert [d for _s, d in pool.calls[0]["jobs"]] == [bare]
+    assert [job[1] for job in pool.calls[0]["jobs"]] == [bare]
 
 
 def test_N4_videos_counts_either_codecs_file(db, capsys):
@@ -764,7 +765,7 @@ def test_P1_limit_applies_after_the_filters(db, pool):
         song(db, lib / n, motion=0.01)
     real = [song(db, lib / n) for n in ("d_real", "e_real")]
     cli.cmd_encode(encode_args(limit=2), db)
-    assert [d for _s, d in pool.calls[0]["jobs"]] == real
+    assert [job[1] for job in pool.calls[0]["jobs"]] == real
 
 
 def test_P1_limit_applies_after_reviewed_and_skip_existing(db, pool):
@@ -774,7 +775,7 @@ def test_P1_limit_applies_after_reviewed_and_skip_existing(db, pool):
     (b / "video.webm").write_bytes(b"x")
     c = song(db, lib / "c_keep", review="keep")
     cli.cmd_encode(encode_args(limit=1, reviewed=True, skip_existing=True), db)
-    assert [d for _s, d in pool.calls[0]["jobs"]] == [c]
+    assert [job[1] for job in pool.calls[0]["jobs"]] == [c]
 
 
 def test_P1_encode_rows_is_shared_by_encode_and_estimate(db, monkeypatch):

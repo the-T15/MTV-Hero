@@ -128,8 +128,8 @@ Stage flags worth knowing:
 | `--upgrade` | `download` | re-fetch only the songs offered a bigger file than the one already downloaded |
 | `--reviewed` | `tag-sources` | only songs you approved by eye |
 | `--codec C` | `encode`, `estimate` | `vp8` (the default), `h264`, or a hardware row |
-| `--quality T` | `encode`, `estimate` | `good` (the default), `better`, `best` or `super` — see below |
-| `--height N` | `encode`, `estimate` | **ceiling**, not a target (default 1080). A smaller video keeps its own size |
+| `--quality T` | `encode`, `estimate` | `good` (the default), `better`, `best` or `super` — the tier for a 1080p source: one step less below it, one more above it. See below |
+| `--height N` | `encode`, `estimate` | **ceiling**, not a target (default 1080). A source between 720p and the ceiling keeps its own size; smaller ones are brought up to 720p |
 | `--crf N` | `encode`, `estimate` | quality number on its own; overrides `--quality`'s and keeps its ceiling |
 | `--preview` | `encode` | low-resolution full-length encode to check sync in YARG |
 | `--keep-source` | `encode` | full-quality encode that keeps the source and leaves the song pending, so a second tier can be encoded from the same download and the two compared by eye |
@@ -211,6 +211,23 @@ tier, because enlarging it adds no detail the file does not have. So an upper
 tier only shows on songs whose *source* is above 1080p, and the pipeline
 downloads at 1080p unless it is asked for more.
 
+**Which is why the tier is per song.** `--quality` names the tier for a 1080p
+source and the ladder moves one step from there: a step down below that
+height, where a higher tier spends bits on detail the file has not got, and a
+step up above it, where it has. It stops at `good` and at `super` rather than
+falling off the ends, and a song with no recorded size takes the tier you
+typed — an unknown source is not a reason to encode something quietly
+cheaper. `encode` and `estimate` both say the mix before they start:
+
+```
+At --quality better: 41 at best, 92 at better, 57 at good (the typed tier at
+1080p, a step down below it, a step up above it)
+```
+
+`estimate` then prices each of them separately and adds them up, because
+those are different ffmpeg commands and a bits-per-second figure belongs to
+one command.
+
 That is what `tag-sources` and `download --upgrade` are for. `tag-sources`
 records two sizes per song — what was downloaded, and the largest height
 YouTube offers — and a download fills both in for free from then on.
@@ -225,6 +242,14 @@ measured bits-per-second figure behind it (on vp8 and `h264_nvenc`). The
 figures for the tiers above it are reasoned from the ceilings, not measured;
 `estimate` says so, and `estimate --measure` replaces one with a number from
 your own videos.
+
+**The floor is 720p.** A source below it is enlarged until it fits
+1280x720 with its shape kept, then padded with black to 16:9; above it
+nothing is ever enlarged. Four of this library's approved videos are 268 to
+360 high, and a 268-high background for the game to stretch across a screen
+is worse than the same picture at 720p with bars — the one place in this
+pipeline where inventing pixels is the lesser evil. The ceiling still wins
+where the two meet, so `--preview` at 480p is still 480p.
 
 ### How big will it be
 

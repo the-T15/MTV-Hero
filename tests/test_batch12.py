@@ -204,7 +204,8 @@ class FakePool:
         self.calls.append(dict(jobs=list(jobs), settings=settings,
                                workers=workers, kw=kw))
         results = {}
-        for _src, d in jobs:
+        for job in jobs:
+            d = job[1]
             results[d] = ((False, "boom") if d.name in self.failing
                           else (True, ""))
             if on_done:

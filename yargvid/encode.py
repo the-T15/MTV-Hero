@@ -198,6 +198,37 @@ def tier_of(tier: str | None, codec: str) -> tuple[int, str]:
     return QUALITY_TIERS[(tier or DEFAULT_QUALITY, codec)]
 
 
+# The source height a typed tier is FOR. `--height` is a ceiling, so a 1080p
+# source encodes at 1080p whatever the tier says; what changes either side of
+# this figure is how much source there is for the extra bits to describe.
+TIER_SOURCE_HEIGHT = 1080
+
+
+def tier_for_source(quality: str | None, source_height: int | None) -> str:
+    """
+    The tier one song really encodes at, from the tier that was typed.
+
+    `--quality` names the tier for a TIER_SOURCE_HEIGHT source and the ladder
+    moves one step from there: a step down below that height, where a higher
+    tier spends bits on detail the file does not have, and a step up above
+    it, where it does. It stops at the ends of QUALITY_ORDER rather than
+    falling off them, so no typed tier can reach past `super` or below
+    `good`.
+
+    A source of unknown height takes the typed tier unchanged. An unknown
+    source is not a reason to encode something quietly cheaper, and
+    `tag-sources` is what closes the gap.
+    """
+    tier = quality or DEFAULT_QUALITY
+    if not source_height:
+        return tier
+    step = -1 if source_height < TIER_SOURCE_HEIGHT else 0
+    if source_height > TIER_SOURCE_HEIGHT:
+        step = 1
+    i = QUALITY_ORDER.index(tier) + step
+    return QUALITY_ORDER[max(0, min(len(QUALITY_ORDER) - 1, i))]
+
+
 @dataclass
 class EncodeSettings:
     height: int = 1080          # 720 roughly halves encode time
@@ -451,6 +482,14 @@ def typical_rate(settings: EncodeSettings) -> float | None:
     )
 
 
+# The smallest background this pipeline will ship. Below it a source is
+# enlarged to fit 1280x720 rather than sent to the game at its own size:
+# four approved sources are 268-360 high, and a 268-high background for the
+# game to stretch across the screen is worse than the same picture at 720p
+# with bars. Above it nothing is ever enlarged - see video_filter.
+MIN_HEIGHT = 720
+
+
 def box_width(height: int) -> int:
     """
     The 16:9 width for a height: 1920, 1280, 854, 640.
@@ -469,29 +508,35 @@ def box_width(height: int) -> int:
 
 def video_filter(settings: EncodeSettings, source_fps: float | None) -> str:
     """
-    Scale under a ceiling, pad out to 16:9, square pixels, constant rate.
+    Scale between a floor and a ceiling, pad to 16:9, square pixels, rate.
 
-    `--height` is a CEILING, so the scale box is the ceiling met against the
-    source - min(W, iw) x min(H, ih) with force_original_aspect_ratio=decrease
-    - and nothing is ever enlarged. A 720p source stays 720p. Blowing it up
+    `--height` is a CEILING and `MIN_HEIGHT` is a FLOOR, and the scale box is
+    both of them met against the source: min(W, max(iw, 1280)) x
+    min(H, max(ih, 720)) with force_original_aspect_ratio=decrease. Between
+    the two nothing moves - a 720p source stays 720p, because blowing it up
     to 1080p invents no detail, costs bits and roughly doubles the encode
-    time, and the game scales whatever it is handed to the screen anyway.
+    time. Below the floor the source is enlarged until it fits 1280x720 with
+    its shape kept; the ceiling wins where the two meet, so a 480p preview is
+    still 480p.
 
     The pad box is then the 16:9 box AT THE OUTPUT HEIGHT rather than a fixed
-    1920x1080: a 4:3 source under a 1080 ceiling comes out 854x480
-    pillarboxed, not blown up. Each side is max(content, partner), so the pad
-    can never be asked for a frame smaller than its own input - which ffmpeg
-    refuses outright, and which the naive spelling does on a 3000x500 source.
+    1920x1080: a 4:3 source under a 1080 ceiling comes out 1280x720
+    pillarboxed, not stretched. Each side is max(content, partner), so the
+    pad can never be asked for a frame smaller than its own input - which
+    ffmpeg refuses outright, and which the naive spelling does on a 3000x500
+    source.
 
-    It is expressions and not numbers taken off this source on purpose.
-    `rate_key` is the command line, so a chain carrying a probed width would
-    make every source resolution its own row of the rates table and no
-    measurement would ever be reused.
+    It is expressions and not numbers taken off this source on purpose, the
+    floor included. `rate_key` is the command line, so a chain carrying a
+    probed width would make every source resolution its own row of the rates
+    table and no measurement would ever be reused.
     """
     w = box_width(settings.height)
     h = settings.height
+    fw, fh = box_width(MIN_HEIGHT), MIN_HEIGHT
     return (
-        rf"scale=w=min({w}\,iw):h=min({h}\,ih):flags=lanczos"
+        rf"scale=w=min({w}\,max(iw\,{fw})):h=min({h}\,max(ih\,{fh}))"
+        rf":flags=lanczos"
         rf":force_original_aspect_ratio=decrease:force_divisible_by=2,"
         rf"pad=w=max(iw\,round(ih*16/9/2)*2):h=max(ih\,round(iw*9/16/2)*2)"
         rf":x=(ow-iw)/2:y=(oh-ih)/2:color=black,"

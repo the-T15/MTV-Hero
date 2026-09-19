@@ -146,7 +146,8 @@ class FakePool:
     def __call__(self, jobs, settings, workers=None, on_done=None, **kw):
         self.calls.append(dict(jobs=list(jobs), settings=settings, kw=kw))
         results = {}
-        for _src, d in jobs:
+        for job in jobs:
+            d = job[1]
             results[d] = (True, "")
             if on_done:
                 on_done(d, results[d])
@@ -247,7 +248,8 @@ def test_S1_height_is_a_ceiling_and_the_box_is_a_min_against_the_source():
 
     vf = vf_of(enc.EncodeSettings())
     # The box is the ceiling met against the source, not a target to reach.
-    assert r"min(1920\,iw)" in vf and r"min(1080\,ih)" in vf
+    assert r"min(1920\,max(iw\,1280))" in vf
+    assert r"min(1080\,max(ih\,720))" in vf
     assert "force_original_aspect_ratio=decrease" in vf
     # ... and the pad is no longer the same fixed box.
     assert "pad=1920:1080" not in vf and "scale=1920:1080" not in vf
@@ -270,7 +272,7 @@ def test_S1_the_comment_that_described_the_old_box_is_gone():
     ("1280x720", (1280, 720)),        # smaller than the ceiling: left alone
     ("1920x1080", (1920, 1080)),      # exactly the ceiling
     ("3840x2160", (1920, 1080)),      # larger: reduced to it
-    ("640x480", (854, 480)),          # 4:3, pillarboxed at ITS OWN height
+    ("640x480", (1280, 720)),         # 4:3 below the floor: pillarboxed at it
     ("2560x1080", (1920, 1080)),      # ultrawide, letterboxed
 ])
 def test_S2_nothing_is_enlarged_at_height_1080(sources, tmp_path, size,
@@ -280,9 +282,12 @@ def test_S2_nothing_is_enlarged_at_height_1080(sources, tmp_path, size,
     assert info.get("sample_aspect_ratio") in (None, "1:1")
     src_w, src_h = (int(x) for x in size.split("x"))
     # "Never enlarge" is about the picture, not the frame: padding may make
-    # the frame wider than the source, but never both wider and taller.
+    # the frame wider than the source, but never both wider and taller. It
+    # is the rule BETWEEN the floor and the ceiling - below the floor the
+    # source is enlarged on purpose, which is what MIN_HEIGHT means.
     w, h = dims(info)
-    assert not (w > src_w and h > src_h)
+    if src_h >= enc.MIN_HEIGHT:
+        assert not (w > src_w and h > src_h)
 
 
 @needs_ffmpeg
@@ -291,9 +296,10 @@ def test_S3_the_pad_box_is_at_the_output_height_not_1920x1080(sources,
     # A 1080p source under a lower ceiling comes down to it.
     assert dims(run_encode(sources("1920x1080"), tmp_path / "a",
                            height=720)) == (1280, 720)
-    # ... and a 4:3 source is padded to 16:9 at 480, not blown up to 1080.
+    # ... and a 4:3 source is padded to 16:9 at the floor, not blown up to
+    # the 1080 ceiling.
     out = tmp_path / "b"
-    assert dims(run_encode(sources("640x480"), out, height=1080)) == (854, 480)
+    assert dims(run_encode(sources("640x480"), out, height=1080)) == (1280, 720)
 
     # The bars are real black and the picture is still in the middle of them.
     written = enc.output_path(out, enc.EncodeSettings(codec="h264"))
@@ -306,9 +312,9 @@ def test_S3_the_pad_box_is_at_the_output_height_not_1920x1080(sources,
         ).stdout
         assert raw
         return max(raw)
-    assert brightest("100:480:0:0") == 0        # left bar
-    assert brightest("100:480:754:0") == 0      # right bar
-    assert brightest("100:480:400:0") > 0       # picture
+    assert brightest("160:720:0:0") == 0        # left bar
+    assert brightest("160:720:1120:0") == 0     # right bar
+    assert brightest("100:720:600:0") > 0       # picture
 
 
 @needs_ffmpeg
@@ -318,7 +324,7 @@ def test_S4_the_preview_path_follows_the_same_rule(sources, tmp_path):
     src = sources("320x240")
     out = tmp_path / "p"
     info = run_encode(src, out, height=480)
-    assert dims(info) == (426, 240)             # 4:3 padded to 16:9 at 240
+    assert dims(info) == (854, 480)             # 4:3 padded to 16:9 at 480
     assert src.exists()
 
 
@@ -330,7 +336,7 @@ def test_S4_the_rule_is_the_filter_not_the_codec(sources, tmp_path):
     s = enc.EncodeSettings(codec="vp8", height=480, cpu_used=5)
     ok, err = enc.encode_one(sources("320x240"), out, s, keep_source=True)
     assert ok, err
-    assert dims(probe(enc.output_path(out, s))) == (426, 240)
+    assert dims(probe(enc.output_path(out, s))) == (854, 480)
 
 
 # ================================================ F  keep the source rate ====
